@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -27,12 +27,13 @@ def root():
         "endpoints": {
             "/upload": "POST - Upload HTML strategy file",
             "/strategies": "GET - List all strategies",
-            "/strategy/{name}": "GET - Get specific strategy data"
+            "/strategy/{name}": "GET - Get specific strategy data",
+            "/recalculate/{name}": "GET - Recalculate with custom risk-free rate"
         }
     }
 
 @app.post("/api/upload")
-async def upload_strategy(file: UploadFile = File(...)):
+async def upload_strategy(file: UploadFile = File(...), risk_free_rate: float = Query(0, description="Risk-free rate in %")):
     """
     Upload e parsing di un file HTML di strategia MetaTrader
     """
@@ -49,14 +50,20 @@ async def upload_strategy(file: UploadFile = File(...)):
         
         # Parsing con strategy_parser
         parser = StrategyParser(temp_path)
-        result = parser.generate_output()
+        result = parser.generate_output(risk_free_rate=risk_free_rate)
         
         # Usa il nome del file originale invece del path temporaneo
         result['strategy_name'] = file.filename.replace('.html', '')
         
         # Salva in memoria
         strategy_name = result['strategy_name']
-        strategies_storage[strategy_name] = result
+        
+        # Salva anche il file path temporaneo per ricalcoli futuri
+        # In realtà salviamo i dati raw per permettere ricalcoli
+        strategies_storage[strategy_name] = {
+            'data': result,
+            'file_content': content  # Salva contenuto per ricalcoli
+        }
         
         # Rimuovi file temporaneo
         os.unlink(temp_path)
@@ -87,10 +94,10 @@ def list_strategies():
         "strategies": [
             {
                 "name": name,
-                "total_trades": data['metrics']['total_trades'],
-                "win_rate": data['metrics']['win_rate_pct'],
-                "total_profit": data['metrics']['total_profit'],
-                "max_dd": data['metrics']['max_drawdown_pct']
+                "total_trades": data['data']['metrics']['total_trades'],
+                "win_rate": data['data']['metrics']['win_rate_pct'],
+                "total_profit": data['data']['metrics']['total_profit'],
+                "max_dd": data['data']['metrics']['max_drawdown_pct']
             }
             for name, data in strategies_storage.items()
         ]
@@ -106,8 +113,46 @@ def get_strategy(strategy_name: str):
     
     return JSONResponse(content={
         "success": True,
-        "data": strategies_storage[strategy_name]
+        "data": strategies_storage[strategy_name]['data']
     })
+
+@app.get("/api/recalculate/{strategy_name}")
+def recalculate_strategy(strategy_name: str, risk_free_rate: float = Query(0, description="Risk-free rate in %")):
+    """
+    Ricalcola una strategia esistente con un nuovo risk-free rate
+    """
+    if strategy_name not in strategies_storage:
+        raise HTTPException(status_code=404, detail=f"Strategia '{strategy_name}' non trovata")
+    
+    try:
+        # Ricrea file temporaneo dal contenuto salvato
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.html') as temp_file:
+            temp_file.write(strategies_storage[strategy_name]['file_content'])
+            temp_path = temp_file.name
+        
+        # Ricalcola con nuovo risk-free rate
+        parser = StrategyParser(temp_path)
+        result = parser.generate_output(risk_free_rate=risk_free_rate)
+        result['strategy_name'] = strategy_name
+        
+        # Aggiorna storage (mantieni file_content)
+        strategies_storage[strategy_name]['data'] = result
+        
+        # Cleanup
+        os.unlink(temp_path)
+        
+        return JSONResponse(content={
+            "success": True,
+            "data": result
+        })
+        
+    except Exception as e:
+        if 'temp_path' in locals():
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+        raise HTTPException(status_code=500, detail=f"Errore ricalcolo: {str(e)}")
 
 @app.delete("/api/strategy/{strategy_name}")
 def delete_strategy(strategy_name: str):
