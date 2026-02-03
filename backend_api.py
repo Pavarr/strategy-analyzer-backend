@@ -51,6 +51,9 @@ async def upload_strategy(file: UploadFile = File(...)):
         parser = StrategyParser(temp_path)
         result = parser.generate_output()
         
+        # Usa il nome del file originale invece del path temporaneo
+        result['strategy_name'] = file.filename.replace('.html', '')
+        
         # Salva in memoria
         strategy_name = result['strategy_name']
         strategies_storage[strategy_name] = result
