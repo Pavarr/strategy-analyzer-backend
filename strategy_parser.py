@@ -379,21 +379,25 @@ class StrategyParser:
         years = days_total / 365
         annualized_return = ((1 + total_return) ** (1 / years) - 1) * 100 if years > 0 else 0
         
-        # Max Drawdown %
+        # Max Drawdown % - CORRETTO per Recovery Factor
         max_dd = 0
         running_max = equity_values[0]
+        equity_at_max_dd_peak = equity_values[0]  # Salva il peak al momento del max DD
+        
         for e in equity_values:
             if e > running_max:
                 running_max = e
             drawdown = (e - running_max) / running_max * 100
             if drawdown < max_dd:
                 max_dd = drawdown
+                equity_at_max_dd_peak = running_max  # Aggiorna il peak quando troviamo un DD maggiore
         
         calmar_ratio = (annualized_return / abs(max_dd)) if max_dd != 0 else 0
         
-        # Recovery Factor
+        # Recovery Factor - CORRETTO
         net_profit = ending_balance - starting_balance
-        recovery_factor = (net_profit / abs(max_dd * starting_balance / 100)) if max_dd != 0 else 0
+        max_dd_abs = equity_at_max_dd_peak * (abs(max_dd) / 100)
+        recovery_factor = (net_profit / max_dd_abs) if max_dd_abs != 0 else 0
         
         return {
             'profit_factor': round(profit_factor, 2),
@@ -402,7 +406,7 @@ class StrategyParser:
             'sharpe_ratio': round(sharpe_annualized, 2),
             'sortino_ratio': round(sortino_annualized, 2),
             'calmar_ratio': round(calmar_ratio, 2),
-            'recovery_factor': round(recovery_factor, 2),
+            'recovery_factor': round(recovery_factor, 3),  # 3 decimali per precisione
             'annualized_return': round(annualized_return, 2),
             'volatility_annual': round(volatility * math.sqrt(trades_per_year) * 100, 2)
         }
