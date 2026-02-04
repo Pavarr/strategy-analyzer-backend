@@ -319,7 +319,17 @@ class StrategyParser:
         equity_line = self.create_equity_line()
         equity_values = equity_line['values']
         
-        returns = []
+        # IMPORTANTE: Includi il PRIMO return calcolato dal capitale iniziale
+        # equity_values[0] è già DOPO il primo trade, quindi manca il primo return!
+        
+        # Calcola starting balance (prima del primo trade)
+        starting_balance = closes[0]['balance'] - closes[0]['profit']
+        
+        # Primo return: dal capitale iniziale al primo trade
+        first_return = closes[0]['profit'] / starting_balance if starting_balance != 0 else 0
+        
+        # Altri returns: da equity[i-1] a equity[i]
+        returns = [first_return]  # Inizia con il primo return!
         for i in range(1, len(equity_values)):
             ret = (equity_values[i] - equity_values[i-1]) / equity_values[i-1]
             returns.append(ret)
@@ -360,9 +370,10 @@ class StrategyParser:
         sortino_annualized = sortino_ratio * math.sqrt(trades_per_year)
         
         # Calmar Ratio (rendimento annualizzato / max drawdown)
-        starting_balance = equity_values[0]
+        # Usa il VERO starting balance (prima del primo trade)
+        true_starting_balance = closes[0]['balance'] - closes[0]['profit']
         ending_balance = equity_values[-1]
-        total_return = (ending_balance - starting_balance) / starting_balance
+        total_return = (ending_balance - true_starting_balance) / true_starting_balance
         
         # Annualizza return
         years = days_total / 365
@@ -449,7 +460,8 @@ class StrategyParser:
                 max_dd = drawdown
         
         # Starting and ending balance
-        starting_balance = closes[0]['balance'] - sum(profits)
+        # CORRETTO: Starting balance = balance dopo primo trade - profit primo trade
+        starting_balance = closes[0]['balance'] - closes[0]['profit']
         ending_balance = closes[-1]['balance']
         
         # Total return
