@@ -600,14 +600,33 @@ class StrategyParser:
         metrics.update(mae_mfe)
         metrics.update(commission_swap)
         
-        # Prepara tabella raw
+        # Prepara tabella raw con tutte le informazioni
         raw_data = []
-        for trade in self.trades:
-            if trade['direction'] == 'out':
+        
+        # Trova coppie di trade in/out
+        for i in range(len(self.trades) - 1):
+            if self.trades[i]['direction'] == 'in' and self.trades[i+1]['direction'] == 'out':
+                entry = self.trades[i]
+                exit = self.trades[i+1]
+                
+                # Separa data e ora
+                entry_datetime = entry['datetime'].split(' ')
+                exit_datetime = exit['datetime'].split(' ')
+                
                 raw_data.append({
-                    'date': trade['datetime'],
-                    'asset': trade['symbol'],
-                    'equity': trade['balance']
+                    'entry_date': entry_datetime[0] if len(entry_datetime) > 0 else entry['datetime'],
+                    'entry_time': entry_datetime[1] if len(entry_datetime) > 1 else '',
+                    'exit_date': exit_datetime[0] if len(exit_datetime) > 0 else exit['datetime'],
+                    'exit_time': exit_datetime[1] if len(exit_datetime) > 1 else '',
+                    'symbol': exit['symbol'],
+                    'type': entry['type'],  # buy o sell
+                    'entry_price': entry['price'],
+                    'exit_price': exit['price'],
+                    'commission': exit['commission'],
+                    'swap': exit['swap'],
+                    'profit': exit['profit'],
+                    'balance': exit['balance'],
+                    'comment': exit['comment']
                 })
         
         output = {
