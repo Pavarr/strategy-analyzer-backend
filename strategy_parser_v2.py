@@ -626,7 +626,7 @@ class StrategyParser:
                     'swap': exit['swap'],
                     'profit': exit['profit'],
                     'balance': exit['balance'],
-                    'comment': exit['comment']
+                    'comment': entry['comment']  # Commento dell'ENTRATA
                 })
         
         output = {
