@@ -8,6 +8,8 @@ class StrategyParser:
         self.html_path = html_path
         self.trades = []
         self.metrics = {}
+        self.original_balance = None
+        self.original_lot_size = None
         
     def parse_html(self):
         """Estrae la tabella Affari dall'HTML"""
@@ -52,40 +54,110 @@ class StrategyParser:
             raise ValueError("Nessun trade trovato nell'HTML")
         
         self.trades = trades_data
+        
+        # Salva balance originale (prima del primo trade)
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        if closes:
+            self.original_balance = closes[0]['balance'] - closes[0]['profit']
+        
         return self.trades
     
+    def check_uniform_lot_size(self):
+        """Verifica se tutti i trade hanno lo stesso lottaggio"""
+        lot_sizes = set([t['volume'] for t in self.trades])
+        is_uniform = len(lot_sizes) == 1
+        lot_size = list(lot_sizes)[0] if is_uniform else None
+        
+        if is_uniform:
+            self.original_lot_size = lot_size
+        
+        return {
+            'is_uniform': is_uniform,
+            'lot_size': lot_size,
+            'unique_lots': list(lot_sizes)
+        }
+    
+    def calculate_commission_swap_totals(self):
+        """Calcola totali commission e swap"""
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        total_commission = sum([t['commission'] for t in closes])
+        total_swap = sum([t['swap'] for t in closes])
+        total_profit = sum([t['profit'] for t in closes])
+        
+        # Percentuale sul profitto (se profitto > 0)
+        commission_pct = (abs(total_commission) / total_profit * 100) if total_profit > 0 else 0
+        swap_pct = (abs(total_swap) / total_profit * 100) if total_profit > 0 else 0
+        
+        return {
+            'total_commission': round(total_commission, 2),
+            'total_swap': round(total_swap, 2),
+            'commission_pct_on_profit': round(commission_pct, 2),
+            'swap_pct_on_profit': round(swap_pct, 2)
+        }
+    
+    def recalculate_with_balance(self, new_balance):
+        """Ricalcola metriche con nuovo balance iniziale (profitti assoluti invariati)"""
+        # Genera output con balance modificato
+        return self.generate_output(risk_free_rate=0, custom_balance=new_balance)
+    
+    def recalculate_with_lot_multiplier(self, lot_multiplier):
+        """Ricalcola metriche con nuovo moltiplicatore lottaggio"""
+        # Salva trades originali
+        original_trades = self.trades.copy()
+        
+        # Moltiplica profit, commission, swap
+        for trade in self.trades:
+            trade['profit'] = trade['profit'] * lot_multiplier
+            trade['commission'] = trade['commission'] * lot_multiplier
+            trade['swap'] = trade['swap'] * lot_multiplier
+            trade['volume'] = trade['volume'] * lot_multiplier
+        
+        # Ricalcola balance
+        self._recalculate_balance()
+        
+        # Genera output
+        result = self.generate_output(risk_free_rate=0)
+        
+        # Ripristina trades originali
+        self.trades = original_trades
+        
+        return result
+    
+    def _recalculate_balance(self):
+        """Ricalcola balance dopo modifica profit/commission/swap"""
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        starting_balance = self.original_balance
+        
+        running_balance = starting_balance
+        for i, trade in enumerate(self.trades):
+            if trade['direction'] == 'out':
+                running_balance += trade['profit']
+                trade['balance'] = running_balance
+    
     def _calculate_duration_no_weekends(self, dt_start, dt_end):
-        """
-        Calcola durata in secondi tra due datetime ESCLUDENDO weekend.
-        Sabato (weekday=5) e Domenica (weekday=6) vengono completamente esclusi.
-        """
+        """Calcola durata in secondi tra due datetime ESCLUDENDO weekend"""
         from datetime import timedelta
         
         total_seconds = 0
         current = dt_start
         
-        # Procedi giorno per giorno
         while current < dt_end:
-            # Determina la fine di questo segmento (fine giorno o dt_end)
             next_day_start = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             segment_end = min(next_day_start, dt_end)
             
-            # Conta il tempo SOLO se NON è weekend
-            # weekday: 0=Lun, 1=Mar, 2=Mer, 3=Gio, 4=Ven, 5=Sab, 6=Dom
             if current.weekday() < 5:  # Lunedì-Venerdì
                 segment_duration = (segment_end - current).total_seconds()
                 total_seconds += segment_duration
             
-            # Passa al giorno successivo
             current = next_day_start
         
         return total_seconds
     
     def calculate_trade_duration(self):
-        """Calcola durata media dei trade (coppia in/out sequenziali) escludendo weekend"""
+        """Calcola durata media dei trade escludendo weekend"""
         durations = []
         
-        # I trade in/out sono sequenziali
         for i in range(len(self.trades) - 1):
             current = self.trades[i]
             next_trade = self.trades[i + 1]
@@ -94,7 +166,6 @@ class StrategyParser:
                 dt1 = datetime.strptime(current['datetime'], '%Y.%m.%d %H:%M:%S')
                 dt2 = datetime.strptime(next_trade['datetime'], '%Y.%m.%d %H:%M:%S')
                 
-                # Calcola duration escludendo weekend
                 duration_seconds = self._calculate_duration_no_weekends(dt1, dt2)
                 durations.append(duration_seconds)
         
@@ -135,24 +206,35 @@ class StrategyParser:
             'max_duration_formatted': f'{max_hours}h {max_minutes}m'
         }
     
-    def create_equity_line(self):
-        """Crea equity line usando solo le chiusure (out)"""
+    def create_equity_line(self, custom_balance=None):
+        """Crea equity line usando solo le chiusure"""
         equity_line = {
             'dates': [],
             'values': []
         }
         
-        for trade in self.trades:
-            if trade['direction'] == 'out':
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        if custom_balance:
+            # Usa balance custom
+            running_balance = custom_balance
+            for trade in closes:
+                running_balance += trade['profit']
+                equity_line['dates'].append(trade['datetime'])
+                equity_line['values'].append(running_balance)
+        else:
+            # Usa balance originale
+            for trade in closes:
                 equity_line['dates'].append(trade['datetime'])
                 equity_line['values'].append(trade['balance'])
         
         return equity_line
     
-    def calculate_drawdowns(self):
+    def calculate_drawdowns(self, equity_line=None):
         """Calcola tabella drawdown"""
-        # Ottieni equity line
-        equity_line = self.create_equity_line()
+        if equity_line is None:
+            equity_line = self.create_equity_line()
+        
         equity = equity_line['values']
         dates = equity_line['dates']
         
@@ -165,9 +247,7 @@ class StrategyParser:
         
         for i in range(len(equity)):
             if equity[i] > current_peak:
-                # Nuovo peak raggiunto
                 if current_peak_idx < i - 1:
-                    # C'era un drawdown precedente
                     trough_idx = current_peak_idx
                     trough = equity[current_peak_idx]
                     
@@ -178,7 +258,6 @@ class StrategyParser:
                     
                     dd_pct = ((trough - current_peak) / current_peak) * 100
                     
-                    # Trova recovery
                     recovery_idx = None
                     for j in range(trough_idx + 1, len(equity)):
                         if equity[j] >= current_peak:
@@ -205,7 +284,6 @@ class StrategyParser:
                 current_peak = equity[i]
                 current_peak_idx = i
         
-        # Controlla drawdown in corso
         if current_peak_idx < len(equity) - 1:
             trough_idx = current_peak_idx
             trough = equity[current_peak_idx]
@@ -227,10 +305,37 @@ class StrategyParser:
                 'recovery_days': 'In corso'
             })
         
-        # Ordina per drawdown %
         drawdowns.sort(key=lambda x: x['drawdown_pct'])
         
         return drawdowns
+    
+    def calculate_drawdown_series(self, equity_line=None):
+        """Calcola serie temporale del drawdown per grafico"""
+        if equity_line is None:
+            equity_line = self.create_equity_line()
+        
+        equity = equity_line['values']
+        dates = equity_line['dates']
+        
+        dd_series = {
+            'dates': dates,
+            'values': [],
+            'values_pct': []
+        }
+        
+        running_max = equity[0]
+        
+        for e in equity:
+            if e > running_max:
+                running_max = e
+            
+            dd_abs = e - running_max
+            dd_pct = (dd_abs / running_max) * 100
+            
+            dd_series['values'].append(round(dd_abs, 2))
+            dd_series['values_pct'].append(round(dd_pct, 2))
+        
+        return dd_series
     
     def calculate_mae_mfe(self):
         """Calcola MAE/MFE proxy usando equity curve"""
@@ -248,23 +353,19 @@ class StrategyParser:
         mae_list = []
         mfe_list = []
         
-        # Per ogni coppia di trade out (rappresenta periodo tra due chiusure)
         for i in range(len(closes) - 1):
             entry_equity = closes[i]['balance']
             exit_equity = closes[i + 1]['balance']
             
-            # Trova tutti i valori equity tra entry e exit
             entry_idx = self.trades.index(next(t for t in self.trades if t == closes[i]))
             exit_idx = self.trades.index(next(t for t in self.trades if t == closes[i + 1]))
             
             equity_slice = [self.trades[j]['balance'] for j in range(entry_idx, exit_idx + 1)]
             
             if equity_slice:
-                # MAE = worst equity drawdown from entry
                 mae = min(equity_slice) - entry_equity
                 mae_pct = (mae / entry_equity * 100) if entry_equity != 0 else 0
                 
-                # MFE = best equity increase from entry
                 mfe = max(equity_slice) - entry_equity
                 mfe_pct = (mfe / entry_equity * 100) if entry_equity != 0 else 0
                 
@@ -274,14 +375,12 @@ class StrategyParser:
         avg_mae = sum(mae_list) / len(mae_list) if mae_list else 0
         avg_mfe = sum(mfe_list) / len(mfe_list) if mfe_list else 0
         
-        # Calcola percentuali medie
         entry_equities = [closes[i]['balance'] for i in range(len(closes) - 1)]
         avg_entry = sum(entry_equities) / len(entry_equities) if entry_equities else 1
         
         avg_mae_pct = (avg_mae / avg_entry * 100) if avg_entry != 0 else 0
         avg_mfe_pct = (avg_mfe / avg_entry * 100) if avg_entry != 0 else 0
         
-        # MAE/MFE Ratio
         mae_mfe_ratio = abs(avg_mfe / avg_mae) if avg_mae != 0 else 0
         
         return {
@@ -292,7 +391,7 @@ class StrategyParser:
             'mae_mfe_ratio': round(mae_mfe_ratio, 2)
         }
     
-    def calculate_advanced_metrics(self, risk_free_rate=0):
+    def calculate_advanced_metrics(self, risk_free_rate=0, custom_balance=None):
         """Calcola metriche avanzate"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
@@ -316,20 +415,17 @@ class StrategyParser:
         kelly_pct = (win_rate - ((1 - win_rate) / win_loss_ratio)) * 100 if win_loss_ratio != 0 else 0
         
         # Calcola returns per Sharpe/Sortino
-        equity_line = self.create_equity_line()
+        equity_line = self.create_equity_line(custom_balance)
         equity_values = equity_line['values']
         
-        # IMPORTANTE: Includi il PRIMO return calcolato dal capitale iniziale
-        # equity_values[0] è già DOPO il primo trade, quindi manca il primo return!
-        
-        # Calcola starting balance (prima del primo trade)
-        starting_balance = closes[0]['balance'] - closes[0]['profit']
+        # Starting balance
+        starting_balance = custom_balance if custom_balance else (closes[0]['balance'] - closes[0]['profit'])
         
         # Primo return: dal capitale iniziale al primo trade
         first_return = closes[0]['profit'] / starting_balance if starting_balance != 0 else 0
         
-        # Altri returns: da equity[i-1] a equity[i]
-        returns = [first_return]  # Inizia con il primo return!
+        # Altri returns
+        returns = [first_return]
         for i in range(1, len(equity_values)):
             ret = (equity_values[i] - equity_values[i-1]) / equity_values[i-1]
             returns.append(ret)
@@ -337,27 +433,24 @@ class StrategyParser:
         if not returns:
             return self._empty_advanced_metrics()
         
-        # Calcola statistiche sui returns
+        # Statistiche returns
         avg_return = sum(returns) / len(returns)
         
-        # Volatilità (deviazione standard)
         variance = sum([(r - avg_return) ** 2 for r in returns]) / len(returns)
         volatility = math.sqrt(variance)
         
-        # Downside deviation (solo returns negativi)
         negative_returns = [r for r in returns if r < 0]
         if negative_returns:
             downside_variance = sum([r ** 2 for r in negative_returns]) / len(negative_returns)
             downside_deviation = math.sqrt(downside_variance)
         else:
-            downside_deviation = 0.0001  # Evita divisione per zero
+            downside_deviation = 0.0001
         
         # Sharpe Ratio
-        rf_per_trade = risk_free_rate / 100 / len(returns)  # Risk-free rate per trade
+        rf_per_trade = risk_free_rate / 100 / len(returns)
         sharpe_ratio = ((avg_return - rf_per_trade) / volatility) if volatility != 0 else 0
         
-        # Annualizza Sharpe (assumendo 365 giorni/anno)
-        # Calcola giorni totali
+        # Annualizza
         first_date = datetime.strptime(equity_line['dates'][0].split()[0], '%Y.%m.%d')
         last_date = datetime.strptime(equity_line['dates'][-1].split()[0], '%Y.%m.%d')
         days_total = (last_date - first_date).days or 1
@@ -369,20 +462,17 @@ class StrategyParser:
         sortino_ratio = ((avg_return - rf_per_trade) / downside_deviation) if downside_deviation != 0 else 0
         sortino_annualized = sortino_ratio * math.sqrt(trades_per_year)
         
-        # Calmar Ratio (rendimento annualizzato / max drawdown)
-        # Usa il VERO starting balance (prima del primo trade)
-        true_starting_balance = closes[0]['balance'] - closes[0]['profit']
+        # Calmar Ratio
         ending_balance = equity_values[-1]
-        total_return = (ending_balance - true_starting_balance) / true_starting_balance
+        total_return = (ending_balance - starting_balance) / starting_balance
         
-        # Annualizza return
         years = days_total / 365
         annualized_return = ((1 + total_return) ** (1 / years) - 1) * 100 if years > 0 else 0
         
         # Max Drawdown % - CORRETTO per Recovery Factor
         max_dd = 0
         running_max = equity_values[0]
-        equity_at_max_dd_peak = equity_values[0]  # Salva il peak al momento del max DD
+        equity_at_max_dd_peak = equity_values[0]
         
         for e in equity_values:
             if e > running_max:
@@ -390,7 +480,7 @@ class StrategyParser:
             drawdown = (e - running_max) / running_max * 100
             if drawdown < max_dd:
                 max_dd = drawdown
-                equity_at_max_dd_peak = running_max  # Aggiorna il peak quando troviamo un DD maggiore
+                equity_at_max_dd_peak = running_max
         
         calmar_ratio = (annualized_return / abs(max_dd)) if max_dd != 0 else 0
         
@@ -406,13 +496,13 @@ class StrategyParser:
             'sharpe_ratio': round(sharpe_annualized, 2),
             'sortino_ratio': round(sortino_annualized, 2),
             'calmar_ratio': round(calmar_ratio, 2),
-            'recovery_factor': round(recovery_factor, 3),  # 3 decimali per precisione
+            'recovery_factor': round(recovery_factor, 3),
             'annualized_return': round(annualized_return, 2),
             'volatility_annual': round(volatility * math.sqrt(trades_per_year) * 100, 2)
         }
     
     def _empty_advanced_metrics(self):
-        """Ritorna metriche vuote se non ci sono dati sufficienti"""
+        """Ritorna metriche vuote"""
         return {
             'profit_factor': 0,
             'win_loss_ratio': 0,
@@ -425,7 +515,7 @@ class StrategyParser:
             'volatility_annual': 0
         }
     
-    def calculate_metrics(self):
+    def calculate_metrics(self, custom_balance=None):
         """Calcola metriche principali"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
@@ -450,7 +540,7 @@ class StrategyParser:
         avg_loss = sum(loss_profits) / len(loss_profits) if loss_profits else 0
         
         # Max DD
-        equity_line = self.create_equity_line()
+        equity_line = self.create_equity_line(custom_balance)
         equity = equity_line['values']
         
         max_dd = 0
@@ -464,9 +554,8 @@ class StrategyParser:
                 max_dd = drawdown
         
         # Starting and ending balance
-        # CORRETTO: Starting balance = balance dopo primo trade - profit primo trade
-        starting_balance = closes[0]['balance'] - closes[0]['profit']
-        ending_balance = closes[-1]['balance']
+        starting_balance = custom_balance if custom_balance else (closes[0]['balance'] - closes[0]['profit'])
+        ending_balance = equity[-1] if equity else starting_balance
         
         # Total return
         total_return_pct = ((ending_balance - starting_balance) / starting_balance) * 100
@@ -488,23 +577,28 @@ class StrategyParser:
         
         return self.metrics
     
-    def generate_output(self, risk_free_rate=0):
+    def generate_output(self, risk_free_rate=0, custom_balance=None):
         """Genera output JSON completo"""
-        # Parse
-        self.parse_html()
+        # Parse (se non già fatto)
+        if not self.trades:
+            self.parse_html()
         
         # Calcola tutto
         duration_stats = self.calculate_trade_duration()
-        equity_line = self.create_equity_line()
-        drawdowns = self.calculate_drawdowns()
-        metrics = self.calculate_metrics()
-        advanced_metrics = self.calculate_advanced_metrics(risk_free_rate)
+        equity_line = self.create_equity_line(custom_balance)
+        drawdowns = self.calculate_drawdowns(equity_line)
+        dd_series = self.calculate_drawdown_series(equity_line)
+        metrics = self.calculate_metrics(custom_balance)
+        advanced_metrics = self.calculate_advanced_metrics(risk_free_rate, custom_balance)
         mae_mfe = self.calculate_mae_mfe()
+        commission_swap = self.calculate_commission_swap_totals()
+        lot_check = self.check_uniform_lot_size()
         
         # Combina tutte le metriche
         metrics.update(duration_stats)
         metrics.update(advanced_metrics)
         metrics.update(mae_mfe)
+        metrics.update(commission_swap)
         
         # Prepara tabella raw
         raw_data = []
@@ -520,8 +614,11 @@ class StrategyParser:
             'strategy_name': self.html_path.split('/')[-1].replace('.html', ''),
             'metrics': metrics,
             'equity_line': equity_line,
+            'drawdown_series': dd_series,
             'drawdowns': drawdowns,
-            'raw_data': raw_data
+            'raw_data': raw_data,
+            'lot_check': lot_check,
+            'original_balance': self.original_balance
         }
         
         return output
