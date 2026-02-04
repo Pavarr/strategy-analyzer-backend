@@ -54,8 +54,35 @@ class StrategyParser:
         self.trades = trades_data
         return self.trades
     
+    def _calculate_duration_no_weekends(self, dt_start, dt_end):
+        """
+        Calcola durata in secondi tra due datetime ESCLUDENDO weekend.
+        Sabato (weekday=5) e Domenica (weekday=6) vengono completamente esclusi.
+        """
+        from datetime import timedelta
+        
+        total_seconds = 0
+        current = dt_start
+        
+        # Procedi giorno per giorno
+        while current < dt_end:
+            # Determina la fine di questo segmento (fine giorno o dt_end)
+            next_day_start = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            segment_end = min(next_day_start, dt_end)
+            
+            # Conta il tempo SOLO se NON è weekend
+            # weekday: 0=Lun, 1=Mar, 2=Mer, 3=Gio, 4=Ven, 5=Sab, 6=Dom
+            if current.weekday() < 5:  # Lunedì-Venerdì
+                segment_duration = (segment_end - current).total_seconds()
+                total_seconds += segment_duration
+            
+            # Passa al giorno successivo
+            current = next_day_start
+        
+        return total_seconds
+    
     def calculate_trade_duration(self):
-        """Calcola durata media dei trade (coppia in/out sequenziali)"""
+        """Calcola durata media dei trade (coppia in/out sequenziali) escludendo weekend"""
         durations = []
         
         # I trade in/out sono sequenziali
@@ -66,7 +93,9 @@ class StrategyParser:
             if current['direction'] == 'in' and next_trade['direction'] == 'out':
                 dt1 = datetime.strptime(current['datetime'], '%Y.%m.%d %H:%M:%S')
                 dt2 = datetime.strptime(next_trade['datetime'], '%Y.%m.%d %H:%M:%S')
-                duration_seconds = (dt2 - dt1).total_seconds()
+                
+                # Calcola duration escludendo weekend
+                duration_seconds = self._calculate_duration_no_weekends(dt1, dt2)
                 durations.append(duration_seconds)
         
         if not durations:
