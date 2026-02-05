@@ -791,6 +791,69 @@ class StrategyParser:
         
         return monthly_stats
     
+    def calculate_returns_distribution(self):
+        """
+        Calcola distribuzione rendimenti (istogramma) con curtosi e asimmetria
+        
+        Returns:
+            dict con bins, frequenze, curtosi e asimmetria
+        """
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        if not closes:
+            return {}
+        
+        profits = [t['profit'] for t in closes]
+        
+        if len(profits) < 3:
+            return {}
+        
+        # Trova min e max
+        min_profit = min(profits)
+        max_profit = max(profits)
+        
+        # Crea bins equidistanti (30 bins)
+        num_bins = min(30, len(profits))  # Max 30 bins o numero trade se minore
+        bin_edges = np.linspace(min_profit, max_profit, num_bins + 1)
+        
+        # Calcola frequenze
+        hist, edges = np.histogram(profits, bins=bin_edges)
+        
+        # Prepara bin labels (centri dei bin)
+        bin_centers = [(edges[i] + edges[i+1]) / 2 for i in range(len(edges)-1)]
+        
+        # Calcola curtosi e asimmetria
+        # Curtosi: misura "code pesanti" della distribuzione
+        # Valori normali: ~3 (distribuzione normale)
+        # >3 = code pesanti (più estremi), <3 = code leggere
+        mean_profit = np.mean(profits)
+        std_profit = np.std(profits, ddof=1)  # sample std
+        
+        if std_profit > 0:
+            # Curtosi (kurtosis) - usando formula standard
+            n = len(profits)
+            fourth_moment = sum([(p - mean_profit)**4 for p in profits]) / n
+            kurtosis = (fourth_moment / (std_profit**4)) - 3  # Excess kurtosis
+            
+            # Asimmetria (skewness)
+            third_moment = sum([(p - mean_profit)**3 for p in profits]) / n
+            skewness = third_moment / (std_profit**3)
+        else:
+            kurtosis = 0
+            skewness = 0
+        
+        return {
+            'bin_centers': [round(x, 2) for x in bin_centers],
+            'frequencies': hist.tolist(),
+            'bin_edges': [round(x, 2) for x in edges.tolist()],
+            'kurtosis': round(kurtosis, 3),
+            'skewness': round(skewness, 3),
+            'min_profit': round(min_profit, 2),
+            'max_profit': round(max_profit, 2),
+            'mean_profit': round(mean_profit, 2),
+            'std_profit': round(std_profit, 2)
+        }
+    
     def generate_output(self, risk_free_rate=0, custom_balance=None):
         """Genera output JSON completo"""
         # Parse (se non già fatto)
@@ -812,6 +875,7 @@ class StrategyParser:
         weekday_stats_full = self.calculate_weekday_statistics(last_6_months_only=False)
         weekday_stats_6m = self.calculate_weekday_statistics(last_6_months_only=True)
         monthly_stats = self.calculate_monthly_statistics()
+        returns_dist = self.calculate_returns_distribution()
         
         # Combina tutte le metriche
         metrics.update(duration_stats)
@@ -861,7 +925,8 @@ class StrategyParser:
                 'full_history': weekday_stats_full,
                 'last_6_months': weekday_stats_6m
             },
-            'monthly_stats': monthly_stats
+            'monthly_stats': monthly_stats,
+            'returns_distribution': returns_dist
         }
         
         return output
