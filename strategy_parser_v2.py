@@ -584,7 +584,7 @@ class StrategyParser:
         Calcola statistiche per giorno della settimana (basato su data di entrata)
         
         Args:
-            last_6_months_only: Se True, considera solo ultimi 6 mesi
+            last_6_months_only: Se True, considera solo ultimi 6 mesi DEI DATI
             
         Returns:
             dict con statistiche per ogni giorno (0=Lunedì, 6=Domenica)
@@ -594,9 +594,18 @@ class StrategyParser:
         if not closes:
             return {}
         
-        # Filtra per ultimi 6 mesi se richiesto
-        if last_6_months_only:
-            six_months_ago = datetime.now() - timedelta(days=180)
+        # Trova ultimo trade nei dati
+        all_dates = []
+        for i in range(len(self.trades) - 1):
+            if self.trades[i]['direction'] == 'in':
+                entry_dt = datetime.strptime(self.trades[i]['datetime'].split(' ')[0], '%Y.%m.%d')
+                all_dates.append(entry_dt)
+        
+        # Calcola cutoff per ultimi 6 mesi DEI DATI
+        six_months_cutoff = None
+        if last_6_months_only and all_dates:
+            last_trade_date = max(all_dates)
+            six_months_cutoff = last_trade_date - timedelta(days=180)
             
         # Raggruppa trade per giorno della settimana (basato su entrata)
         weekday_trades = defaultdict(list)
@@ -610,7 +619,7 @@ class StrategyParser:
                 entry_dt = datetime.strptime(entry['datetime'].split(' ')[0], '%Y.%m.%d')
                 
                 # Filtra per 6 mesi se richiesto
-                if last_6_months_only and entry_dt < six_months_ago:
+                if last_6_months_only and six_months_cutoff and entry_dt < six_months_cutoff:
                     continue
                 
                 weekday = entry_dt.weekday()  # 0=Lunedì, 6=Domenica
@@ -702,6 +711,10 @@ class StrategyParser:
         for year in sorted(monthly_trades.keys()):
             monthly_stats[year] = {}
             
+            # Raccogli tutti i profit dell'anno per calcolare statistiche annuali
+            year_profits = []
+            year_trades_count = 0
+            
             for month in range(1, 13):
                 if month not in monthly_trades[year] or len(monthly_trades[year][month]) == 0:
                     monthly_stats[year][month] = {
@@ -718,6 +731,8 @@ class StrategyParser:
                 losses = [p for p in profits if p < 0]
                 
                 num_trades = len(profits)
+                year_trades_count += num_trades
+                year_profits.extend(profits)
                 
                 # Rendimento % del mese (calcolato sul balance iniziale del mese)
                 first_balance_before = trades[0]['balance'] - trades[0]['profit']
@@ -737,6 +752,41 @@ class StrategyParser:
                     'return_pct': round(return_pct, 2),
                     'profit_factor': round(profit_factor, 2),
                     'volatility': round(volatility, 2)
+                }
+            
+            # Calcola statistiche annuali
+            if year_profits:
+                year_wins = [p for p in year_profits if p > 0]
+                year_losses = [p for p in year_profits if p < 0]
+                
+                year_gross_profit = sum(year_wins) if year_wins else 0
+                year_gross_loss = abs(sum(year_losses)) if year_losses else 0
+                year_profit_factor = (year_gross_profit / year_gross_loss) if year_gross_loss > 0 else 0
+                
+                year_total_profit = sum(year_profits)
+                year_volatility = np.std(year_profits) if len(year_profits) > 1 else 0
+                year_win_rate = (len(year_wins) / len(year_profits) * 100) if year_profits else 0
+                
+                # Calcola return % annuale (somma di tutti i profit dell'anno)
+                # Prendo balance all'inizio dell'anno
+                first_year_trade = monthly_trades[year][min(monthly_trades[year].keys())][0]
+                year_start_balance = first_year_trade['balance'] - first_year_trade['profit']
+                year_return_pct = (year_total_profit / year_start_balance * 100) if year_start_balance > 0 else 0
+                
+                monthly_stats[year]['yearly_total'] = {
+                    'num_trades': year_trades_count,
+                    'return_pct': round(year_return_pct, 2),
+                    'profit_factor': round(year_profit_factor, 2),
+                    'volatility': round(year_volatility, 2),
+                    'win_rate': round(year_win_rate, 2)
+                }
+            else:
+                monthly_stats[year]['yearly_total'] = {
+                    'num_trades': 0,
+                    'return_pct': 0,
+                    'profit_factor': 0,
+                    'volatility': 0,
+                    'win_rate': 0
                 }
         
         return monthly_stats
