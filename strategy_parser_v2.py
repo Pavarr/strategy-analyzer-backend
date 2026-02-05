@@ -1,7 +1,9 @@
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import math
+from collections import defaultdict
+import numpy as np
 
 class StrategyParser:
     def __init__(self, html_path):
@@ -577,6 +579,168 @@ class StrategyParser:
         
         return self.metrics
     
+    def calculate_weekday_statistics(self, last_6_months_only=False):
+        """
+        Calcola statistiche per giorno della settimana (basato su data di entrata)
+        
+        Args:
+            last_6_months_only: Se True, considera solo ultimi 6 mesi
+            
+        Returns:
+            dict con statistiche per ogni giorno (0=Lunedì, 6=Domenica)
+        """
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        if not closes:
+            return {}
+        
+        # Filtra per ultimi 6 mesi se richiesto
+        if last_6_months_only:
+            six_months_ago = datetime.now() - timedelta(days=180)
+            
+        # Raggruppa trade per giorno della settimana (basato su entrata)
+        weekday_trades = defaultdict(list)
+        
+        for i in range(len(self.trades) - 1):
+            if self.trades[i]['direction'] == 'in' and self.trades[i+1]['direction'] == 'out':
+                entry = self.trades[i]
+                exit_trade = self.trades[i+1]
+                
+                # Parse data di entrata
+                entry_dt = datetime.strptime(entry['datetime'].split(' ')[0], '%Y.%m.%d')
+                
+                # Filtra per 6 mesi se richiesto
+                if last_6_months_only and entry_dt < six_months_ago:
+                    continue
+                
+                weekday = entry_dt.weekday()  # 0=Lunedì, 6=Domenica
+                weekday_trades[weekday].append(exit_trade['profit'])
+        
+        # Calcola statistiche per ogni giorno
+        weekday_stats = {}
+        weekday_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        
+        for day in range(7):
+            if day not in weekday_trades or len(weekday_trades[day]) == 0:
+                weekday_stats[weekday_names[day]] = {
+                    'num_trades': 0,
+                    'win_rate': 0,
+                    'profit_factor': 0,
+                    'avg_return': 0,
+                    'volatility': 0,
+                    'win_loss_ratio': 0,
+                    'returns': []
+                }
+                continue
+            
+            profits = weekday_trades[day]
+            wins = [p for p in profits if p > 0]
+            losses = [p for p in profits if p < 0]
+            
+            num_trades = len(profits)
+            win_rate = (len(wins) / num_trades * 100) if num_trades > 0 else 0
+            
+            # Profit factor
+            gross_profit = sum(wins) if wins else 0
+            gross_loss = abs(sum(losses)) if losses else 0
+            profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+            
+            # Avg return e volatilità
+            avg_return = sum(profits) / num_trades if num_trades > 0 else 0
+            volatility = np.std(profits) if len(profits) > 1 else 0
+            
+            # Win/Loss ratio
+            avg_win = sum(wins) / len(wins) if wins else 0
+            avg_loss = sum(losses) / len(losses) if losses else 0
+            win_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+            
+            weekday_stats[weekday_names[day]] = {
+                'num_trades': num_trades,
+                'win_rate': round(win_rate, 2),
+                'profit_factor': round(profit_factor, 2),
+                'avg_return': round(avg_return, 2),
+                'volatility': round(volatility, 2),
+                'win_loss_ratio': round(win_loss_ratio, 2),
+                'returns': [round(p, 2) for p in profits]  # Per box plot
+            }
+        
+        return weekday_stats
+    
+    def calculate_monthly_statistics(self):
+        """
+        Calcola statistiche per mese/anno (basato su data di entrata)
+        
+        Returns:
+            dict con anni come chiavi e mesi come sotto-chiavi
+        """
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        if not closes:
+            return {}
+        
+        # Raggruppa trade per mese/anno
+        monthly_trades = defaultdict(lambda: defaultdict(list))
+        
+        for i in range(len(self.trades) - 1):
+            if self.trades[i]['direction'] == 'in' and self.trades[i+1]['direction'] == 'out':
+                entry = self.trades[i]
+                exit_trade = self.trades[i+1]
+                
+                # Parse data di entrata
+                entry_dt = datetime.strptime(entry['datetime'].split(' ')[0], '%Y.%m.%d')
+                year = entry_dt.year
+                month = entry_dt.month
+                
+                monthly_trades[year][month].append({
+                    'profit': exit_trade['profit'],
+                    'balance': exit_trade['balance']
+                })
+        
+        # Calcola statistiche per ogni mese
+        monthly_stats = {}
+        
+        for year in sorted(monthly_trades.keys()):
+            monthly_stats[year] = {}
+            
+            for month in range(1, 13):
+                if month not in monthly_trades[year] or len(monthly_trades[year][month]) == 0:
+                    monthly_stats[year][month] = {
+                        'num_trades': 0,
+                        'return_pct': None,
+                        'profit_factor': 0,
+                        'volatility': 0
+                    }
+                    continue
+                
+                trades = monthly_trades[year][month]
+                profits = [t['profit'] for t in trades]
+                wins = [p for p in profits if p > 0]
+                losses = [p for p in profits if p < 0]
+                
+                num_trades = len(profits)
+                
+                # Rendimento % del mese (calcolato sul balance iniziale del mese)
+                first_balance_before = trades[0]['balance'] - trades[0]['profit']
+                total_profit_month = sum(profits)
+                return_pct = (total_profit_month / first_balance_before * 100) if first_balance_before > 0 else 0
+                
+                # Profit factor
+                gross_profit = sum(wins) if wins else 0
+                gross_loss = abs(sum(losses)) if losses else 0
+                profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+                
+                # Volatilità
+                volatility = np.std(profits) if len(profits) > 1 else 0
+                
+                monthly_stats[year][month] = {
+                    'num_trades': num_trades,
+                    'return_pct': round(return_pct, 2),
+                    'profit_factor': round(profit_factor, 2),
+                    'volatility': round(volatility, 2)
+                }
+        
+        return monthly_stats
+    
     def generate_output(self, risk_free_rate=0, custom_balance=None):
         """Genera output JSON completo"""
         # Parse (se non già fatto)
@@ -593,6 +757,11 @@ class StrategyParser:
         mae_mfe = self.calculate_mae_mfe()
         commission_swap = self.calculate_commission_swap_totals()
         lot_check = self.check_uniform_lot_size()
+        
+        # Nuove statistiche temporali
+        weekday_stats_full = self.calculate_weekday_statistics(last_6_months_only=False)
+        weekday_stats_6m = self.calculate_weekday_statistics(last_6_months_only=True)
+        monthly_stats = self.calculate_monthly_statistics()
         
         # Combina tutte le metriche
         metrics.update(duration_stats)
@@ -637,7 +806,12 @@ class StrategyParser:
             'drawdowns': drawdowns,
             'raw_data': raw_data,
             'lot_check': lot_check,
-            'original_balance': self.original_balance
+            'original_balance': self.original_balance,
+            'weekday_stats': {
+                'full_history': weekday_stats_full,
+                'last_6_months': weekday_stats_6m
+            },
+            'monthly_stats': monthly_stats
         }
         
         return output
