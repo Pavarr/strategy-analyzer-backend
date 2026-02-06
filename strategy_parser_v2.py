@@ -4,6 +4,8 @@ import json
 import math
 from collections import defaultdict
 import numpy as np
+from scipy import stats
+import statsmodels.api as sm
 
 class StrategyParser:
     def __init__(self, html_path):
@@ -393,9 +395,11 @@ class StrategyParser:
             'mae_mfe_ratio': round(mae_mfe_ratio, 2)
         }
     
-    def calculate_advanced_metrics(self, risk_free_rate=0, custom_balance=None):
-        """Calcola metriche avanzate"""
-        closes = [t for t in self.trades if t['direction'] == 'out']
+    def calculate_advanced_metrics(self, risk_free_rate=0, custom_balance=None, trade_type='all'):
+        """Calcola metriche avanzate con supporto filtro trade type"""
+        # Applica filtro trade
+        filtered_trades = self.filter_trades_by_type(trade_type)
+        closes = [t for t in filtered_trades if t['direction'] == 'out']
         
         if not closes or len(closes) < 2:
             return self._empty_advanced_metrics()
@@ -491,6 +495,18 @@ class StrategyParser:
         max_dd_abs = equity_at_max_dd_peak * (abs(max_dd) / 100)
         recovery_factor = (net_profit / max_dd_abs) if max_dd_abs != 0 else 0
         
+        # === NUOVE STATISTICHE ===
+        
+        # SQN (System Quality Number)
+        profits = [t['profit'] for t in closes]
+        sqn = self.calculate_sqn(profits)
+        
+        # P-value IID (T-test)
+        p_value_iid = self.calculate_p_value_ttest(returns)
+        
+        # P-value HAC (Newey-West)
+        p_value_hac = self.calculate_p_value_newey_west(returns)
+        
         return {
             'profit_factor': round(profit_factor, 2),
             'win_loss_ratio': round(win_loss_ratio, 2),
@@ -500,7 +516,10 @@ class StrategyParser:
             'calmar_ratio': round(calmar_ratio, 2),
             'recovery_factor': round(recovery_factor, 3),
             'annualized_return': round(annualized_return, 2),
-            'volatility_annual': round(volatility * math.sqrt(trades_per_year) * 100, 2)
+            'volatility_annual': round(volatility * math.sqrt(trades_per_year) * 100, 2),
+            'sqn': round(sqn, 2),
+            'p_value_iid': round(p_value_iid, 4),
+            'p_value_hac': round(p_value_hac, 4)
         }
     
     def _empty_advanced_metrics(self):
@@ -514,12 +533,52 @@ class StrategyParser:
             'calmar_ratio': 0,
             'recovery_factor': 0,
             'annualized_return': 0,
-            'volatility_annual': 0
+            'volatility_annual': 0,
+            'sqn': 0,
+            'p_value_iid': 1.0,
+            'p_value_hac': 1.0
         }
     
-    def calculate_metrics(self, custom_balance=None):
-        """Calcola metriche principali"""
-        closes = [t for t in self.trades if t['direction'] == 'out']
+    def filter_trades_by_type(self, trade_type='all'):
+        """
+        Filtra i trade per tipo
+        
+        Args:
+            trade_type: 'all', 'long' (buy), o 'short' (sell)
+            
+        Returns:
+            Lista di trade filtrati
+        """
+        if trade_type == 'all':
+            return self.trades
+        elif trade_type == 'long':
+            # Filtra solo trade buy
+            filtered = []
+            for i in range(len(self.trades)):
+                if self.trades[i]['direction'] == 'in' and self.trades[i]['type'] == 'buy':
+                    filtered.append(self.trades[i])
+                    # Aggiungi anche l'uscita corrispondente
+                    if i + 1 < len(self.trades) and self.trades[i + 1]['direction'] == 'out':
+                        filtered.append(self.trades[i + 1])
+            return filtered
+        elif trade_type == 'short':
+            # Filtra solo trade sell
+            filtered = []
+            for i in range(len(self.trades)):
+                if self.trades[i]['direction'] == 'in' and self.trades[i]['type'] == 'sell':
+                    filtered.append(self.trades[i])
+                    # Aggiungi anche l'uscita corrispondente
+                    if i + 1 < len(self.trades) and self.trades[i + 1]['direction'] == 'out':
+                        filtered.append(self.trades[i + 1])
+            return filtered
+        else:
+            return self.trades
+    
+    def calculate_metrics(self, custom_balance=None, trade_type='all'):
+        """Calcola metriche principali con supporto filtro trade type"""
+        # Applica filtro trade
+        filtered_trades = self.filter_trades_by_type(trade_type)
+        closes = [t for t in filtered_trades if t['direction'] == 'out']
         
         if not closes:
             return {}
@@ -578,6 +637,90 @@ class StrategyParser:
         }
         
         return self.metrics
+    
+    def calculate_sqn(self, profits):
+        """
+        Calcola System Quality Number (Van Tharp)
+        SQN = sqrt(N) * (mean_profit / std_profit)
+        
+        Args:
+            profits: Lista profitti trade
+            
+        Returns:
+            float: SQN value
+        """
+        if len(profits) < 2:
+            return 0
+        
+        n = len(profits)
+        mean_profit = np.mean(profits)
+        std_profit = np.std(profits, ddof=1)
+        
+        if std_profit == 0:
+            return 0
+        
+        sqn = np.sqrt(n) * (mean_profit / std_profit)
+        return sqn
+    
+    def calculate_p_value_ttest(self, returns):
+        """
+        1-sample T-test per verificare se mean(returns) != 0
+        
+        H0: mean return = 0 (nessun edge)
+        H1: mean return != 0 (edge presente)
+        
+        Args:
+            returns: Lista rendimenti
+            
+        Returns:
+            float: p-value
+        """
+        if len(returns) < 2:
+            return 1.0  # Non possiamo rigettare H0
+        
+        try:
+            # T-test contro mean = 0
+            t_statistic, p_value = stats.ttest_1samp(returns, 0)
+            return p_value
+        except:
+            return 1.0
+    
+    def calculate_p_value_newey_west(self, returns):
+        """
+        OLS regression con Newey-West HAC standard errors
+        Testa se mean return è significativamente diverso da 0
+        considerando autocorrelazione ed eteroschedasticità
+        
+        Args:
+            returns: Lista rendimenti
+            
+        Returns:
+            float: p-value con correzione HAC
+        """
+        if len(returns) < 10:  # Serve un minimo di dati
+            return 1.0
+        
+        try:
+            # Regressione semplice: returns = alpha + epsilon
+            y = np.array(returns)
+            X = np.ones(len(returns))  # Solo intercetta
+            
+            # OLS con Newey-West
+            model = sm.OLS(y, X)
+            
+            # Maxlags per Newey-West (regola empirica: n^0.25)
+            maxlags = int(len(returns) ** 0.25)
+            
+            results = model.fit(cov_type='HAC', cov_kwds={'maxlags': maxlags})
+            
+            # P-value per l'intercetta (alpha)
+            p_value = results.pvalues[0]
+            
+            return p_value
+            
+        except Exception as e:
+            # Fallback a T-test se Newey-West fallisce
+            return self.calculate_p_value_ttest(returns)
     
     def calculate_weekday_statistics(self, last_6_months_only=False):
         """
@@ -854,8 +997,8 @@ class StrategyParser:
             'std_profit': round(std_profit, 2)
         }
     
-    def generate_output(self, risk_free_rate=0, custom_balance=None):
-        """Genera output JSON completo"""
+    def generate_output(self, risk_free_rate=0, custom_balance=None, trade_type='all'):
+        """Genera output JSON completo con supporto filtro trade type"""
         # Parse (se non già fatto)
         if not self.trades:
             self.parse_html()
@@ -865,8 +1008,8 @@ class StrategyParser:
         equity_line = self.create_equity_line(custom_balance)
         drawdowns = self.calculate_drawdowns(equity_line)
         dd_series = self.calculate_drawdown_series(equity_line)
-        metrics = self.calculate_metrics(custom_balance)
-        advanced_metrics = self.calculate_advanced_metrics(risk_free_rate, custom_balance)
+        metrics = self.calculate_metrics(custom_balance, trade_type)
+        advanced_metrics = self.calculate_advanced_metrics(risk_free_rate, custom_balance, trade_type)
         mae_mfe = self.calculate_mae_mfe()
         commission_swap = self.calculate_commission_swap_totals()
         lot_check = self.check_uniform_lot_size()
