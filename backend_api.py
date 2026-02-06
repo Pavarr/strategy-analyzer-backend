@@ -1,206 +1,165 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import os
 import tempfile
-import shutil
-from pathlib import Path
+import os
 from strategy_parser_v2 import StrategyParser
 
 app = FastAPI(title="Strategy Analyzer API")
 
-# CORS configuration - permetti tutto
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permetti tutti i domini
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Storage in memoria per strategie (reset al riavvio)
-strategies_storage = {}
+# In-memory storage
 parsers_storage = {}
-
-# Directory temporanea per file HTML caricati
-TEMP_DIR = Path(tempfile.gettempdir()) / "strategy_analyzer"
-TEMP_DIR.mkdir(exist_ok=True)
-
+strategies_storage = {}
 
 @app.get("/")
-async def root():
-    """Health check"""
+def root():
     return {
-        "status": "online",
-        "strategies_count": len(strategies_storage),
-        "strategies": list(strategies_storage.keys())
+        "message": "Strategy Analyzer API v2",
+        "endpoints": {
+            "/upload": "POST - Upload strategy HTML",
+            "/strategies/{name}": "GET - Get strategy data with optional trade_type filter",
+            "/recalculate/{name}": "GET - Recalculate with new parameters"
+        }
     }
-
 
 @app.post("/upload")
 async def upload_strategy(file: UploadFile = File(...)):
-    """
-    Upload e analizza file HTML strategia MetaTrader
-    """
+    """Upload and parse MetaTrader HTML file"""
+    
+    if not file.filename.endswith('.html'):
+        raise HTTPException(status_code=400, detail="File must be .html")
+    
     try:
-        # Verifica che sia un file HTML
-        if not file.filename.endswith('.html'):
-            raise HTTPException(status_code=400, detail="File must be .html")
-        
-        # Salva file temporaneamente
-        temp_path = TEMP_DIR / file.filename
-        with open(temp_path, 'wb') as f:
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.html') as temp_file:
             content = await file.read()
-            f.write(content)
+            temp_file.write(content)
+            temp_path = temp_file.name
         
-        # Parse strategia
-        parser = StrategyParser(str(temp_path))
-        result = parser.generate_output(risk_free_rate=0)
+        # Parse
+        parser = StrategyParser(temp_path)
+        result = parser.generate_output(risk_free_rate=0, trade_type='all')
         
         strategy_name = result['strategy_name']
         
-        # Salva in memoria
-        strategies_storage[strategy_name] = result
+        # Store parser and result
         parsers_storage[strategy_name] = parser
+        strategies_storage[strategy_name] = result
+        
+        # Cleanup
+        os.unlink(temp_path)
         
         return result
         
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/strategies")
-async def list_strategies():
-    """
-    Lista tutte le strategie caricate
-    """
-    return {
-        "strategies": list(strategies_storage.keys()),
-        "count": len(strategies_storage)
-    }
-
-
-@app.get("/strategies/{strategy_name}")
-async def get_strategy(strategy_name: str):
-    """
-    Ottieni dati di una strategia specifica
-    """
-    if strategy_name not in strategies_storage:
-        raise HTTPException(status_code=404, detail="Strategy not found")
-    
-    return strategies_storage[strategy_name]
-
-
-@app.delete("/strategies/{strategy_name}")
-async def delete_strategy(strategy_name: str):
-    """
-    Elimina una strategia
-    """
-    if strategy_name not in strategies_storage:
-        raise HTTPException(status_code=404, detail="Strategy not found")
-    
-    # Rimuovi da storage
-    del strategies_storage[strategy_name]
-    del parsers_storage[strategy_name]
-    
-    # Rimuovi file temporaneo se esiste
-    temp_path = TEMP_DIR / f"{strategy_name}.html"
-    if temp_path.exists():
-        temp_path.unlink()
-    
-    return {"message": f"Strategy '{strategy_name}' deleted successfully"}
-
-
-@app.get("/recalculate/{strategy_name}")
-async def recalculate_strategy(
-    strategy_name: str,
-    rf_rate: float = 0,
-    balance: float = None,
-    lot_multiplier: float = None
+@app.get("/strategies/{name}")
+async def get_strategy(
+    name: str,
+    trade_type: str = Query('all', regex='^(all|long|short)$')
 ):
     """
-    Ricalcola metriche con nuovi parametri
+    Get strategy data with optional trade type filter
     
-    Args:
-        strategy_name: Nome della strategia
-        rf_rate: Risk-free rate (%)
-        balance: Nuovo balance iniziale (opzionale)
-        lot_multiplier: Moltiplicatore lottaggio (opzionale)
+    trade_type: 'all', 'long', or 'short'
     """
-    if strategy_name not in parsers_storage:
+    if name not in parsers_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
     
     try:
-        parser = parsers_storage[strategy_name]
-        
-        # Caso 1: Solo balance modificato
-        if balance is not None and lot_multiplier is None:
-            result = parser.generate_output(risk_free_rate=rf_rate, custom_balance=balance)
-        
-        # Caso 2: Solo lottaggio modificato
-        elif balance is None and lot_multiplier is not None and lot_multiplier != 1:
-            # Verifica che lottaggio sia uniforme
-            lot_check = parser.check_uniform_lot_size()
-            if not lot_check['is_uniform']:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot change lot size: trades have different lot sizes"
-                )
-            result = parser.recalculate_with_lot_multiplier(lot_multiplier)
-            
-            # Applica anche rf_rate se diverso da 0
-            if rf_rate != 0:
-                result = parser.generate_output(risk_free_rate=rf_rate)
-        
-        # Caso 3: Entrambi modificati
-        elif balance is not None and lot_multiplier is not None and lot_multiplier != 1:
-            # Prima applica lottaggio
-            lot_check = parser.check_uniform_lot_size()
-            if not lot_check['is_uniform']:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot change lot size: trades have different lot sizes"
-                )
-            
-            # Moltiplica profit/comm/swap
-            for trade in parser.trades:
-                trade['profit'] = trade['profit'] * lot_multiplier
-                trade['commission'] = trade['commission'] * lot_multiplier
-                trade['swap'] = trade['swap'] * lot_multiplier
-                trade['volume'] = trade['volume'] * lot_multiplier
-            
-            # Ricalcola balance
-            parser._recalculate_balance()
-            
-            # Poi applica custom balance e rf_rate
-            result = parser.generate_output(risk_free_rate=rf_rate, custom_balance=balance)
-        
-        # Caso 4: Solo rf_rate modificato
-        else:
-            result = parser.generate_output(risk_free_rate=rf_rate, custom_balance=balance)
-        
-        # Aggiorna storage
-        strategies_storage[strategy_name] = result
+        parser = parsers_storage[name]
+        result = parser.generate_output(risk_free_rate=0, trade_type=trade_type)
         
         return result
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recalculation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/recalculate/{name}")
+async def recalculate_metrics(
+    name: str,
+    rf_rate: float = Query(0, ge=0, le=10),
+    trade_type: str = Query('all', regex='^(all|long|short)$'),
+    balance: float = Query(None),
+    lot_multiplier: float = Query(None)
+):
+    """
+    Recalculate metrics with new parameters
+    
+    rf_rate: Risk-free rate (0-10%)
+    trade_type: 'all', 'long', or 'short'
+    balance: Custom starting balance (optional)
+    lot_multiplier: Lot size multiplier (optional)
+    """
+    if name not in parsers_storage:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    
+    try:
+        parser = parsers_storage[name]
+        
+        # Apply lot multiplier if provided
+        if lot_multiplier is not None and lot_multiplier != 1.0:
+            # Multiply profits, commission, swap
+            for trade in parser.trades:
+                if 'original_profit' not in trade:
+                    trade['original_profit'] = trade['profit']
+                    trade['original_commission'] = trade['commission']
+                    trade['original_swap'] = trade['swap']
+                
+                trade['profit'] = trade['original_profit'] * lot_multiplier
+                trade['commission'] = trade['original_commission'] * lot_multiplier
+                trade['swap'] = trade['original_swap'] * lot_multiplier
+        
+        result = parser.generate_output(risk_free_rate=rf_rate, trade_type=trade_type)
+        
+        # Apply custom balance if provided
+        if balance is not None:
+            # Recalculate equity line with new starting balance
+            profits = [t['profit'] for t in result['metrics']['paired_trades']]
+            new_balance = balance
+            new_equity_line = [new_balance]
+            
+            for profit in profits:
+                new_balance += profit
+                new_equity_line.append(new_balance)
+            
+            result['metrics']['starting_balance'] = balance
+            result['metrics']['ending_balance'] = new_balance
+            result['metrics']['equity_line'] = new_equity_line
+            
+            # Recalculate return percentage
+            total_profit = sum(profits)
+            result['metrics']['total_return'] = ((new_balance - balance) / balance * 100) if balance > 0 else 0
+            result['metrics']['total_return_pct'] = result['metrics']['total_return']
+        
+        # Update storage
+        strategies_storage[name] = result
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "temp_dir": str(TEMP_DIR),
-        "strategies_loaded": len(strategies_storage)
-    }
-
+@app.delete("/strategies/{name}")
+async def delete_strategy(name: str):
+    """Delete strategy from memory"""
+    if name not in strategies_storage:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    
+    del strategies_storage[name]
+    del parsers_storage[name]
+    
+    return {"message": f"Strategy '{name}' deleted"}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
