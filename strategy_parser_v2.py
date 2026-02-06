@@ -903,6 +903,7 @@ class StrategyParser:
                     'exit_time': exit_datetime[1] if len(exit_datetime) > 1 else '',
                     'symbol': exit['symbol'],
                     'type': entry['type'],  # buy o sell
+                    'volume': entry['volume'],  # lot size
                     'entry_price': entry['price'],
                     'exit_price': exit['price'],
                     'commission': exit['commission'],
