@@ -12,7 +12,6 @@ class StrategyParser:
         self.metrics = {}
         self.original_balance = None
         self.original_lot_size = None
-        self.strategy_name = None  # Per nome custom dal backend
         
     def parse_html(self):
         """Estrae la tabella Affari dall'HTML"""
@@ -915,7 +914,7 @@ class StrategyParser:
                 })
         
         output = {
-            'strategy_name': self.strategy_name if self.strategy_name else self.html_path.split('/')[-1].replace('.html', ''),
+            'strategy_name': self.html_path.split('/')[-1].replace('.html', ''),
             'metrics': metrics,
             'equity_line': equity_line,
             'drawdown_series': dd_series,
