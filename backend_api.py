@@ -15,17 +15,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage
+# Storage
 parsers_storage = {}
 strategies_storage = {}
 
 @app.get("/")
-def root():
+async def root():
     return {
         "message": "Strategy Analyzer API v2",
         "endpoints": {
             "/upload": "POST - Upload strategy HTML",
-            "/strategies/{name}": "GET - Get strategy data with optional trade_type filter",
+            "/strategies/{name}": "GET - Get strategy data",
+            "/strategies": "GET - List all strategies",
+            "/strategies/{name}": "DELETE - Delete strategy",
             "/recalculate/{name}": "GET - Recalculate with new parameters"
         }
     }
@@ -46,7 +48,7 @@ async def upload_strategy(file: UploadFile = File(...)):
         
         # Parse
         parser = StrategyParser(temp_path)
-        result = parser.generate_output(risk_free_rate=0, trade_type='all')
+        result = parser.generate_output(risk_free_rate=0)
         
         strategy_name = result['strategy_name']
         
@@ -63,21 +65,14 @@ async def upload_strategy(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/strategies/{name}")
-async def get_strategy(
-    name: str,
-    trade_type: str = Query('all', regex='^(all|long|short)$')
-):
-    """
-    Get strategy data with optional trade type filter
-    
-    trade_type: 'all', 'long', or 'short'
-    """
+async def get_strategy(name: str):
+    """Get strategy data"""
     if name not in parsers_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
     
     try:
         parser = parsers_storage[name]
-        result = parser.generate_output(risk_free_rate=0, trade_type=trade_type)
+        result = parser.generate_output(risk_free_rate=0)
         
         return result
         
@@ -88,18 +83,10 @@ async def get_strategy(
 async def recalculate_metrics(
     name: str,
     rf_rate: float = Query(0, ge=0, le=10),
-    trade_type: str = Query('all', regex='^(all|long|short)$'),
     balance: float = Query(None),
     lot_multiplier: float = Query(None)
 ):
-    """
-    Recalculate metrics with new parameters
-    
-    rf_rate: Risk-free rate (0-10%)
-    trade_type: 'all', 'long', or 'short'
-    balance: Custom starting balance (optional)
-    lot_multiplier: Lot size multiplier (optional)
-    """
+    """Recalculate metrics with new parameters"""
     if name not in parsers_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
     
@@ -108,7 +95,6 @@ async def recalculate_metrics(
         
         # Apply lot multiplier if provided
         if lot_multiplier is not None and lot_multiplier != 1.0:
-            # Multiply profits, commission, swap
             for trade in parser.trades:
                 if 'original_profit' not in trade:
                     trade['original_profit'] = trade['profit']
@@ -119,27 +105,7 @@ async def recalculate_metrics(
                 trade['commission'] = trade['original_commission'] * lot_multiplier
                 trade['swap'] = trade['original_swap'] * lot_multiplier
         
-        result = parser.generate_output(risk_free_rate=rf_rate, trade_type=trade_type)
-        
-        # Apply custom balance if provided
-        if balance is not None:
-            # Recalculate equity line with new starting balance
-            profits = [t['profit'] for t in result['metrics']['paired_trades']]
-            new_balance = balance
-            new_equity_line = [new_balance]
-            
-            for profit in profits:
-                new_balance += profit
-                new_equity_line.append(new_balance)
-            
-            result['metrics']['starting_balance'] = balance
-            result['metrics']['ending_balance'] = new_balance
-            result['metrics']['equity_line'] = new_equity_line
-            
-            # Recalculate return percentage
-            total_profit = sum(profits)
-            result['metrics']['total_return'] = ((new_balance - balance) / balance * 100) if balance > 0 else 0
-            result['metrics']['total_return_pct'] = result['metrics']['total_return']
+        result = parser.generate_output(risk_free_rate=rf_rate, custom_balance=balance)
         
         # Update storage
         strategies_storage[name] = result
@@ -160,6 +126,7 @@ async def delete_strategy(name: str):
     
     return {"message": f"Strategy '{name}' deleted"}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/strategies")
+async def list_strategies():
+    """List all uploaded strategies"""
+    return {"strategies": list(strategies_storage.keys())}
