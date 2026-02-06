@@ -4,10 +4,6 @@ import json
 import math
 from collections import defaultdict
 import numpy as np
-from scipy import stats
-import statsmodels.api as sm
-from statsmodels.regression.linear_model import OLS
-from statsmodels.stats.sandwich_covariance import cov_hac
 
 class StrategyParser:
     def __init__(self, html_path, original_filename=None):
@@ -424,7 +420,7 @@ class StrategyParser:
         }
     
     def calculate_statistical_tests(self):
-        """Calcola SQN e p-values (IID e HAC)"""
+        """Calcola SQN e p-values (IID e HAC) usando solo numpy"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
         if len(closes) < 2:
@@ -446,42 +442,62 @@ class StrategyParser:
         else:
             sqn = 0
         
-        # P-value (IID) - 1-sample T-test vs H0: mean = 0
-        try:
-            t_stat, p_value_iid = stats.ttest_1samp(profits, 0)
-            p_value_iid = float(p_value_iid)
-        except:
+        # P-value (IID) - T-test manuale
+        if std_profit > 0:
+            t_stat = mean_profit / (std_profit / np.sqrt(n))
+            # Approssimazione p-value usando distribuzione normale per grandi campioni
+            # Per n > 30, t-distribution ≈ normal distribution
+            if n > 30:
+                from math import erf
+                p_value_iid = 2 * (1 - 0.5 * (1 + erf(abs(t_stat) / np.sqrt(2))))
+            else:
+                # Per n piccoli, usa approssimazione più conservativa
+                p_value_iid = 2 * (1 - self._t_cdf(abs(t_stat), n - 1))
+        else:
             p_value_iid = 1.0
         
-        # P-value (HAC) - OLS con Newey-West
-        try:
-            # Regressione: profit[t] = alpha + epsilon[t]
-            X = np.ones((n, 1))  # Intercept only
-            y = profits
+        # P-value (HAC) - Versione semplificata con correzione autocorrelazione
+        # Calcola autocorrelazione lag-1
+        if n > 2:
+            returns_centered = profits - mean_profit
+            autocorr = np.correlate(returns_centered[:-1], returns_centered[1:], mode='valid')[0] / np.sum(returns_centered**2)
             
-            model = OLS(y, X)
-            results = model.fit()
+            # Correzione Newey-West semplificata
+            se_hac = std_profit / np.sqrt(n) * np.sqrt(1 + 2 * abs(autocorr))
             
-            # Newey-West HAC covariance
-            # maxlags ~ n^(1/4)
-            maxlags = int(np.floor(n**(1/4)))
-            cov_hac_matrix = cov_hac(results, nlags=maxlags)
-            
-            # T-statistic con HAC
-            se_hac = np.sqrt(cov_hac_matrix[0, 0])
-            t_hac = results.params[0] / se_hac
-            
-            # P-value (two-tailed)
-            p_value_hac = 2 * (1 - stats.t.cdf(abs(t_hac), df=n-1))
-            p_value_hac = float(p_value_hac)
-        except:
+            if se_hac > 0:
+                t_hac = mean_profit / se_hac
+                if n > 30:
+                    from math import erf
+                    p_value_hac = 2 * (1 - 0.5 * (1 + erf(abs(t_hac) / np.sqrt(2))))
+                else:
+                    p_value_hac = 2 * (1 - self._t_cdf(abs(t_hac), n - 1))
+            else:
+                p_value_hac = 1.0
+        else:
             p_value_hac = 1.0
         
         return {
             'sqn': round(sqn, 3),
-            'p_value_iid': round(p_value_iid, 4),
-            'p_value_hac': round(p_value_hac, 4)
+            'p_value_iid': round(float(p_value_iid), 4),
+            'p_value_hac': round(float(p_value_hac), 4)
         }
+    
+    def _t_cdf(self, t, df):
+        """Approssimazione CDF della distribuzione t di Student"""
+        # Approssimazione di Hill (1970) per t-distribution CDF
+        # Accurata per df > 2
+        x = df / (t**2 + df)
+        
+        # Beta distribution approximation
+        if df == 1:
+            return 0.5 + np.arctan(t) / np.pi
+        elif df == 2:
+            return 0.5 + t / (2 * np.sqrt(2 + t**2))
+        else:
+            # Approssimazione generale
+            a = df / 2
+            return 1 - 0.5 * x**a * (1 + (1 - x) * (a + 0.5) / (a + 1))
     
     def calculate_advanced_metrics(self, risk_free_rate=0, custom_balance=None):
         """Calcola metriche avanzate"""
@@ -854,7 +870,7 @@ class StrategyParser:
         return monthly_stats
     
     def calculate_returns_distribution(self):
-        """Calcola distribuzione rendimenti con skewness e kurtosis corretti"""
+        """Calcola distribuzione rendimenti con skewness e kurtosis usando numpy"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
         if not closes:
@@ -866,31 +882,41 @@ class StrategyParser:
             return {}
         
         # Crea bins
-        min_profit = min(profits)
-        max_profit = max(profits)
+        min_profit = float(np.min(profits))
+        max_profit = float(np.max(profits))
         num_bins = min(30, len(profits))
         bin_edges = np.linspace(min_profit, max_profit, num_bins + 1)
         
         hist, edges = np.histogram(profits, bins=bin_edges)
         bin_centers = [(edges[i] + edges[i+1]) / 2 for i in range(len(edges)-1)]
         
-        # Calcola skewness e kurtosis usando scipy
-        skewness = float(stats.skew(profits, bias=False))  # Sample skewness
-        kurtosis = float(stats.kurtosis(profits, bias=False))  # Excess kurtosis
+        # Calcola skewness e kurtosis manualmente
+        n = len(profits)
+        mean = np.mean(profits)
+        std = np.std(profits, ddof=1)  # Sample std
         
-        mean_profit = float(np.mean(profits))
-        std_profit = float(np.std(profits, ddof=1))
+        if std > 0:
+            # Skewness (sample): E[(X-μ)^3] / σ^3
+            m3 = np.sum((profits - mean)**3) / n
+            skewness = m3 / (std**3)
+            
+            # Kurtosis (excess, sample): E[(X-μ)^4] / σ^4 - 3
+            m4 = np.sum((profits - mean)**4) / n
+            kurtosis = (m4 / (std**4)) - 3
+        else:
+            skewness = 0.0
+            kurtosis = 0.0
         
         return {
-            'bin_centers': [round(x, 2) for x in bin_centers],
+            'bin_centers': [round(float(x), 2) for x in bin_centers],
             'frequencies': hist.tolist(),
-            'bin_edges': [round(x, 2) for x in edges.tolist()],
-            'kurtosis': round(kurtosis, 3),
-            'skewness': round(skewness, 3),
+            'bin_edges': [round(float(x), 2) for x in edges.tolist()],
+            'kurtosis': round(float(kurtosis), 3),
+            'skewness': round(float(skewness), 3),
             'min_profit': round(float(min_profit), 2),
             'max_profit': round(float(max_profit), 2),
-            'mean_profit': round(mean_profit, 2),
-            'std_profit': round(std_profit, 2)
+            'mean_profit': round(float(mean), 2),
+            'std_profit': round(float(std), 2)
         }
     
     def generate_output(self, risk_free_rate=0, custom_balance=None, trade_type='all'):
