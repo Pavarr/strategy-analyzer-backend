@@ -64,6 +64,12 @@ class StrategyParser:
         closes = [t for t in self.trades if t['direction'] == 'out']
         if closes:
             self.original_balance = closes[0]['balance'] - closes[0]['profit']
+        else:
+            # Fallback: usa primo trade o default
+            if self.trades:
+                self.original_balance = self.trades[0].get('balance', 10000)
+            else:
+                self.original_balance = 10000
         
         return self.trades
     
@@ -440,7 +446,7 @@ class StrategyParser:
             return self._empty_advanced_metrics()
         
         # Starting balance
-        starting_balance = custom_balance if custom_balance else self.original_balance
+        starting_balance = custom_balance if custom_balance else (self.original_balance if self.original_balance else 10000)
         
         # Primo return: dal capitale iniziale al primo trade
         first_return = closes[0]['profit'] / starting_balance if starting_balance != 0 else 0
@@ -621,7 +627,7 @@ class StrategyParser:
         
         if not equity:
             max_dd = 0
-            starting_balance = custom_balance if custom_balance else self.original_balance
+            starting_balance = custom_balance if custom_balance else (self.original_balance if self.original_balance else 10000)
             ending_balance = starting_balance
         else:
             max_dd = 0
@@ -635,11 +641,11 @@ class StrategyParser:
                     max_dd = drawdown
             
             # Starting and ending balance
-            starting_balance = custom_balance if custom_balance else self.original_balance
+            starting_balance = custom_balance if custom_balance else (self.original_balance if self.original_balance else 10000)
             ending_balance = equity[-1]
         
         # Total return
-        total_return_pct = ((ending_balance - starting_balance) / starting_balance) * 100
+        total_return_pct = ((ending_balance - starting_balance) / starting_balance) * 100 if starting_balance != 0 else 0
         
         self.metrics = {
             'total_trades': int(total_trades),
