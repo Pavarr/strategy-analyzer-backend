@@ -4,11 +4,17 @@ import json
 import math
 from collections import defaultdict
 import numpy as np
+from scipy import stats
+import statsmodels.api as sm
+from statsmodels.regression.linear_model import OLS
+from statsmodels.stats.sandwich_covariance import cov_hac
 
 class StrategyParser:
-    def __init__(self, html_path):
+    def __init__(self, html_path, original_filename=None):
         self.html_path = html_path
+        self.original_filename = original_filename
         self.trades = []
+        self.original_trades = []  # Backup per reset
         self.metrics = {}
         self.original_balance = None
         self.original_lot_size = None
@@ -56,6 +62,7 @@ class StrategyParser:
             raise ValueError("Nessun trade trovato nell'HTML")
         
         self.trades = trades_data
+        self.original_trades = [t.copy() for t in trades_data]  # Backup
         
         # Salva balance originale (prima del primo trade)
         closes = [t for t in self.trades if t['direction'] == 'out']
@@ -64,9 +71,71 @@ class StrategyParser:
         
         return self.trades
     
+    def reset_trades(self):
+        """Reset trades to original state"""
+        self.trades = [t.copy() for t in self.original_trades]
+    
+    def apply_lot_multiplier(self, lot_ratio):
+        """Applica ratio lottaggio a tutti i trade"""
+        if not self.original_lot_size:
+            return
+        
+        # Applica a tutti i trade
+        for trade in self.trades:
+            trade['volume'] = trade['volume'] * lot_ratio
+            trade['profit'] = trade['profit'] * lot_ratio
+            trade['commission'] = trade['commission'] * lot_ratio
+            trade['swap'] = trade['swap'] * lot_ratio
+        
+        # Ricalcola balance
+        self._recalculate_balance()
+    
+    def _recalculate_balance(self):
+        """Ricalcola balance dopo modifica profit/commission/swap"""
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        starting_balance = self.original_balance
+        
+        running_balance = starting_balance
+        for trade in self.trades:
+            if trade['direction'] == 'out':
+                running_balance += trade['profit']
+                trade['balance'] = running_balance
+    
+    def filter_trades_by_type(self, trade_type='all'):
+        """Filtra trade per tipo (all/long/short)"""
+        if trade_type == 'all':
+            return
+        
+        # Identifica coppie in/out da mantenere
+        filtered_trades = []
+        
+        for i in range(len(self.trades) - 1):
+            if self.trades[i]['direction'] == 'in' and self.trades[i+1]['direction'] == 'out':
+                entry = self.trades[i]
+                exit_trade = self.trades[i+1]
+                
+                # Filtra per tipo
+                if trade_type == 'long' and entry['type'].lower() == 'buy':
+                    filtered_trades.append(entry)
+                    filtered_trades.append(exit_trade)
+                elif trade_type == 'short' and entry['type'].lower() == 'sell':
+                    filtered_trades.append(entry)
+                    filtered_trades.append(exit_trade)
+        
+        # Sostituisci trades con filtrati
+        self.trades = filtered_trades
+        
+        # Ricalcola balance da zero partendo da original_balance
+        if self.trades:
+            running_balance = self.original_balance
+            for trade in self.trades:
+                if trade['direction'] == 'out':
+                    running_balance += trade['profit']
+                    trade['balance'] = running_balance
+    
     def check_uniform_lot_size(self):
         """Verifica se tutti i trade hanno lo stesso lottaggio"""
-        lot_sizes = set([t['volume'] for t in self.trades])
+        lot_sizes = set([t['volume'] for t in self.original_trades])
         is_uniform = len(lot_sizes) == 1
         lot_size = list(lot_sizes)[0] if is_uniform else None
         
@@ -97,45 +166,6 @@ class StrategyParser:
             'commission_pct_on_profit': round(commission_pct, 2),
             'swap_pct_on_profit': round(swap_pct, 2)
         }
-    
-    def recalculate_with_balance(self, new_balance):
-        """Ricalcola metriche con nuovo balance iniziale (profitti assoluti invariati)"""
-        # Genera output con balance modificato
-        return self.generate_output(risk_free_rate=0, custom_balance=new_balance)
-    
-    def recalculate_with_lot_multiplier(self, lot_multiplier):
-        """Ricalcola metriche con nuovo moltiplicatore lottaggio"""
-        # Salva trades originali
-        original_trades = self.trades.copy()
-        
-        # Moltiplica profit, commission, swap
-        for trade in self.trades:
-            trade['profit'] = trade['profit'] * lot_multiplier
-            trade['commission'] = trade['commission'] * lot_multiplier
-            trade['swap'] = trade['swap'] * lot_multiplier
-            trade['volume'] = trade['volume'] * lot_multiplier
-        
-        # Ricalcola balance
-        self._recalculate_balance()
-        
-        # Genera output
-        result = self.generate_output(risk_free_rate=0)
-        
-        # Ripristina trades originali
-        self.trades = original_trades
-        
-        return result
-    
-    def _recalculate_balance(self):
-        """Ricalcola balance dopo modifica profit/commission/swap"""
-        closes = [t for t in self.trades if t['direction'] == 'out']
-        starting_balance = self.original_balance
-        
-        running_balance = starting_balance
-        for i, trade in enumerate(self.trades):
-            if trade['direction'] == 'out':
-                running_balance += trade['profit']
-                trade['balance'] = running_balance
     
     def _calculate_duration_no_weekends(self, dt_start, dt_end):
         """Calcola durata in secondi tra due datetime ESCLUDENDO weekend"""
@@ -225,7 +255,7 @@ class StrategyParser:
                 equity_line['dates'].append(trade['datetime'])
                 equity_line['values'].append(running_balance)
         else:
-            # Usa balance originale
+            # Usa balance corrente
             for trade in closes:
                 equity_line['dates'].append(trade['datetime'])
                 equity_line['values'].append(trade['balance'])
@@ -391,6 +421,66 @@ class StrategyParser:
             'avg_mfe': round(avg_mfe, 2),
             'avg_mfe_pct': round(avg_mfe_pct, 2),
             'mae_mfe_ratio': round(mae_mfe_ratio, 2)
+        }
+    
+    def calculate_statistical_tests(self):
+        """Calcola SQN e p-values (IID e HAC)"""
+        closes = [t for t in self.trades if t['direction'] == 'out']
+        
+        if len(closes) < 2:
+            return {
+                'sqn': 0,
+                'p_value_iid': 1.0,
+                'p_value_hac': 1.0
+            }
+        
+        profits = np.array([t['profit'] for t in closes])
+        n = len(profits)
+        
+        # SQN = (mean / std) * sqrt(n)
+        mean_profit = np.mean(profits)
+        std_profit = np.std(profits, ddof=1)  # Sample std
+        
+        if std_profit > 0:
+            sqn = (mean_profit / std_profit) * np.sqrt(n)
+        else:
+            sqn = 0
+        
+        # P-value (IID) - 1-sample T-test vs H0: mean = 0
+        try:
+            t_stat, p_value_iid = stats.ttest_1samp(profits, 0)
+            p_value_iid = float(p_value_iid)
+        except:
+            p_value_iid = 1.0
+        
+        # P-value (HAC) - OLS con Newey-West
+        try:
+            # Regressione: profit[t] = alpha + epsilon[t]
+            X = np.ones((n, 1))  # Intercept only
+            y = profits
+            
+            model = OLS(y, X)
+            results = model.fit()
+            
+            # Newey-West HAC covariance
+            # maxlags ~ n^(1/4)
+            maxlags = int(np.floor(n**(1/4)))
+            cov_hac_matrix = cov_hac(results, nlags=maxlags)
+            
+            # T-statistic con HAC
+            se_hac = np.sqrt(cov_hac_matrix[0, 0])
+            t_hac = results.params[0] / se_hac
+            
+            # P-value (two-tailed)
+            p_value_hac = 2 * (1 - stats.t.cdf(abs(t_hac), df=n-1))
+            p_value_hac = float(p_value_hac)
+        except:
+            p_value_hac = 1.0
+        
+        return {
+            'sqn': round(sqn, 3),
+            'p_value_iid': round(p_value_iid, 4),
+            'p_value_hac': round(p_value_hac, 4)
         }
     
     def calculate_advanced_metrics(self, risk_free_rate=0, custom_balance=None):
@@ -580,15 +670,7 @@ class StrategyParser:
         return self.metrics
     
     def calculate_weekday_statistics(self, last_6_months_only=False):
-        """
-        Calcola statistiche per giorno della settimana (basato su data di entrata)
-        
-        Args:
-            last_6_months_only: Se True, considera solo ultimi 6 mesi DEI DATI
-            
-        Returns:
-            dict con statistiche per ogni giorno (0=Lunedì, 6=Domenica)
-        """
+        """Calcola statistiche per giorno della settimana"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
         if not closes:
@@ -607,7 +689,7 @@ class StrategyParser:
             last_trade_date = max(all_dates)
             six_months_cutoff = last_trade_date - timedelta(days=180)
             
-        # Raggruppa trade per giorno della settimana (basato su entrata)
+        # Raggruppa trade per giorno della settimana
         weekday_trades = defaultdict(list)
         
         for i in range(len(self.trades) - 1):
@@ -615,17 +697,15 @@ class StrategyParser:
                 entry = self.trades[i]
                 exit_trade = self.trades[i+1]
                 
-                # Parse data di entrata
                 entry_dt = datetime.strptime(entry['datetime'].split(' ')[0], '%Y.%m.%d')
                 
-                # Filtra per 6 mesi se richiesto
                 if last_6_months_only and six_months_cutoff and entry_dt < six_months_cutoff:
                     continue
                 
-                weekday = entry_dt.weekday()  # 0=Lunedì, 6=Domenica
+                weekday = entry_dt.weekday()
                 weekday_trades[weekday].append(exit_trade['profit'])
         
-        # Calcola statistiche per ogni giorno
+        # Calcola statistiche
         weekday_stats = {}
         weekday_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         
@@ -649,16 +729,13 @@ class StrategyParser:
             num_trades = len(profits)
             win_rate = (len(wins) / num_trades * 100) if num_trades > 0 else 0
             
-            # Profit factor
             gross_profit = sum(wins) if wins else 0
             gross_loss = abs(sum(losses)) if losses else 0
             profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
             
-            # Avg return e volatilità
             avg_return = sum(profits) / num_trades if num_trades > 0 else 0
             volatility = np.std(profits) if len(profits) > 1 else 0
             
-            # Win/Loss ratio
             avg_win = sum(wins) / len(wins) if wins else 0
             avg_loss = sum(losses) / len(losses) if losses else 0
             win_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
@@ -670,24 +747,18 @@ class StrategyParser:
                 'avg_return': round(avg_return, 2),
                 'volatility': round(volatility, 2),
                 'win_loss_ratio': round(win_loss_ratio, 2),
-                'returns': [round(p, 2) for p in profits]  # Per box plot
+                'returns': [round(p, 2) for p in profits]
             }
         
         return weekday_stats
     
     def calculate_monthly_statistics(self):
-        """
-        Calcola statistiche per mese/anno (basato su data di entrata)
-        
-        Returns:
-            dict con anni come chiavi e mesi come sotto-chiavi
-        """
+        """Calcola statistiche per mese/anno"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
         if not closes:
             return {}
         
-        # Raggruppa trade per mese/anno
         monthly_trades = defaultdict(lambda: defaultdict(list))
         
         for i in range(len(self.trades) - 1):
@@ -695,7 +766,6 @@ class StrategyParser:
                 entry = self.trades[i]
                 exit_trade = self.trades[i+1]
                 
-                # Parse data di entrata
                 entry_dt = datetime.strptime(entry['datetime'].split(' ')[0], '%Y.%m.%d')
                 year = entry_dt.year
                 month = entry_dt.month
@@ -705,13 +775,11 @@ class StrategyParser:
                     'balance': exit_trade['balance']
                 })
         
-        # Calcola statistiche per ogni mese
         monthly_stats = {}
         
         for year in sorted(monthly_trades.keys()):
             monthly_stats[year] = {}
             
-            # Raccogli tutti i profit dell'anno per calcolare statistiche annuali
             year_profits = []
             year_trades_count = 0
             
@@ -734,17 +802,14 @@ class StrategyParser:
                 year_trades_count += num_trades
                 year_profits.extend(profits)
                 
-                # Rendimento % del mese (calcolato sul balance iniziale del mese)
                 first_balance_before = trades[0]['balance'] - trades[0]['profit']
                 total_profit_month = sum(profits)
                 return_pct = (total_profit_month / first_balance_before * 100) if first_balance_before > 0 else 0
                 
-                # Profit factor
                 gross_profit = sum(wins) if wins else 0
                 gross_loss = abs(sum(losses)) if losses else 0
                 profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
                 
-                # Volatilità
                 volatility = np.std(profits) if len(profits) > 1 else 0
                 
                 monthly_stats[year][month] = {
@@ -754,7 +819,6 @@ class StrategyParser:
                     'volatility': round(volatility, 2)
                 }
             
-            # Calcola statistiche annuali
             if year_profits:
                 year_wins = [p for p in year_profits if p > 0]
                 year_losses = [p for p in year_profits if p < 0]
@@ -767,8 +831,6 @@ class StrategyParser:
                 year_volatility = np.std(year_profits) if len(year_profits) > 1 else 0
                 year_win_rate = (len(year_wins) / len(year_profits) * 100) if year_profits else 0
                 
-                # Calcola return % annuale (somma di tutti i profit dell'anno)
-                # Prendo balance all'inizio dell'anno
                 first_year_trade = monthly_trades[year][min(monthly_trades[year].keys())][0]
                 year_start_balance = first_year_trade['balance'] - first_year_trade['profit']
                 year_return_pct = (year_total_profit / year_start_balance * 100) if year_start_balance > 0 else 0
@@ -792,55 +854,32 @@ class StrategyParser:
         return monthly_stats
     
     def calculate_returns_distribution(self):
-        """
-        Calcola distribuzione rendimenti (istogramma) con curtosi e asimmetria
-        
-        Returns:
-            dict con bins, frequenze, curtosi e asimmetria
-        """
+        """Calcola distribuzione rendimenti con skewness e kurtosis corretti"""
         closes = [t for t in self.trades if t['direction'] == 'out']
         
         if not closes:
             return {}
         
-        profits = [t['profit'] for t in closes]
+        profits = np.array([t['profit'] for t in closes])
         
         if len(profits) < 3:
             return {}
         
-        # Trova min e max
+        # Crea bins
         min_profit = min(profits)
         max_profit = max(profits)
-        
-        # Crea bins equidistanti (30 bins)
-        num_bins = min(30, len(profits))  # Max 30 bins o numero trade se minore
+        num_bins = min(30, len(profits))
         bin_edges = np.linspace(min_profit, max_profit, num_bins + 1)
         
-        # Calcola frequenze
         hist, edges = np.histogram(profits, bins=bin_edges)
-        
-        # Prepara bin labels (centri dei bin)
         bin_centers = [(edges[i] + edges[i+1]) / 2 for i in range(len(edges)-1)]
         
-        # Calcola curtosi e asimmetria
-        # Curtosi: misura "code pesanti" della distribuzione
-        # Valori normali: ~3 (distribuzione normale)
-        # >3 = code pesanti (più estremi), <3 = code leggere
-        mean_profit = np.mean(profits)
-        std_profit = np.std(profits, ddof=1)  # sample std
+        # Calcola skewness e kurtosis usando scipy
+        skewness = float(stats.skew(profits, bias=False))  # Sample skewness
+        kurtosis = float(stats.kurtosis(profits, bias=False))  # Excess kurtosis
         
-        if std_profit > 0:
-            # Curtosi (kurtosis) - usando formula standard
-            n = len(profits)
-            fourth_moment = sum([(p - mean_profit)**4 for p in profits]) / n
-            kurtosis = (fourth_moment / (std_profit**4)) - 3  # Excess kurtosis
-            
-            # Asimmetria (skewness)
-            third_moment = sum([(p - mean_profit)**3 for p in profits]) / n
-            skewness = third_moment / (std_profit**3)
-        else:
-            kurtosis = 0
-            skewness = 0
+        mean_profit = float(np.mean(profits))
+        std_profit = float(np.std(profits, ddof=1))
         
         return {
             'bin_centers': [round(x, 2) for x in bin_centers],
@@ -848,17 +887,21 @@ class StrategyParser:
             'bin_edges': [round(x, 2) for x in edges.tolist()],
             'kurtosis': round(kurtosis, 3),
             'skewness': round(skewness, 3),
-            'min_profit': round(min_profit, 2),
-            'max_profit': round(max_profit, 2),
+            'min_profit': round(float(min_profit), 2),
+            'max_profit': round(float(max_profit), 2),
             'mean_profit': round(mean_profit, 2),
             'std_profit': round(std_profit, 2)
         }
     
-    def generate_output(self, risk_free_rate=0, custom_balance=None):
+    def generate_output(self, risk_free_rate=0, custom_balance=None, trade_type='all'):
         """Genera output JSON completo"""
         # Parse (se non già fatto)
-        if not self.trades:
+        if not self.original_trades:
             self.parse_html()
+        
+        # Reset e applica filtro
+        self.reset_trades()
+        self.filter_trades_by_type(trade_type)
         
         # Calcola tutto
         duration_stats = self.calculate_trade_duration()
@@ -870,29 +913,28 @@ class StrategyParser:
         mae_mfe = self.calculate_mae_mfe()
         commission_swap = self.calculate_commission_swap_totals()
         lot_check = self.check_uniform_lot_size()
+        statistical_tests = self.calculate_statistical_tests()
         
-        # Nuove statistiche temporali
         weekday_stats_full = self.calculate_weekday_statistics(last_6_months_only=False)
         weekday_stats_6m = self.calculate_weekday_statistics(last_6_months_only=True)
         monthly_stats = self.calculate_monthly_statistics()
         returns_dist = self.calculate_returns_distribution()
         
-        # Combina tutte le metriche
+        # Combina metriche
         metrics.update(duration_stats)
         metrics.update(advanced_metrics)
         metrics.update(mae_mfe)
         metrics.update(commission_swap)
+        metrics.update(statistical_tests)
         
-        # Prepara tabella raw con tutte le informazioni
+        # Prepara raw data
         raw_data = []
         
-        # Trova coppie di trade in/out
         for i in range(len(self.trades) - 1):
             if self.trades[i]['direction'] == 'in' and self.trades[i+1]['direction'] == 'out':
                 entry = self.trades[i]
                 exit = self.trades[i+1]
                 
-                # Separa data e ora
                 entry_datetime = entry['datetime'].split(' ')
                 exit_datetime = exit['datetime'].split(' ')
                 
@@ -902,19 +944,22 @@ class StrategyParser:
                     'exit_date': exit_datetime[0] if len(exit_datetime) > 0 else exit['datetime'],
                     'exit_time': exit_datetime[1] if len(exit_datetime) > 1 else '',
                     'symbol': exit['symbol'],
-                    'type': entry['type'],  # buy o sell
-                    'volume': entry['volume'],  # lot size
+                    'type': entry['type'],
+                    'volume': entry['volume'],
                     'entry_price': entry['price'],
                     'exit_price': exit['price'],
                     'commission': exit['commission'],
                     'swap': exit['swap'],
                     'profit': exit['profit'],
                     'balance': exit['balance'],
-                    'comment': entry['comment']  # Commento dell'ENTRATA
+                    'comment': entry['comment']
                 })
         
+        # Usa nome file originale se disponibile
+        strategy_name = self.original_filename.replace('.html', '') if self.original_filename else self.html_path.split('/')[-1].replace('.html', '')
+        
         output = {
-            'strategy_name': self.html_path.split('/')[-1].replace('.html', ''),
+            'strategy_name': strategy_name,
             'metrics': metrics,
             'equity_line': equity_line,
             'drawdown_series': dd_series,
