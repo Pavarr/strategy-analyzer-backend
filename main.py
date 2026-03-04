@@ -135,3 +135,124 @@ async def delete_strategy(name: str):
 async def list_strategies():
     """List all uploaded strategies"""
     return {"strategies": list(strategies_storage.keys())}
+
+
+# =============================================
+# MT5 LIVE ACCOUNTS ENDPOINTS
+# =============================================
+from pydantic import BaseModel
+from typing import Optional, List
+import httpx
+from datetime import datetime
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json"
+    }
+
+class MT5Data(BaseModel):
+    api_key: str
+    account_number: str
+    account_name: Optional[str] = ""
+    balance: float
+    equity: float
+    drawdown_pct: float
+    open_trades: Optional[list] = []
+    closed_trades: Optional[list] = []
+    stats: Optional[dict] = {}
+
+@app.post("/mt5/update")
+async def mt5_update(data: MT5Data):
+    """Riceve i dati dall'EA MT5 e li salva su Supabase"""
+
+    async with httpx.AsyncClient() as client:
+
+        # 1. Trova l'utente tramite api_key
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{data.api_key}", "select": "user_id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        user_id = profiles[0]["user_id"]
+
+        # 2. Cerca se esiste già un record per questo conto
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/mt5_accounts",
+            headers=supabase_headers(),
+            params={
+                "user_id": f"eq.{user_id}",
+                "account_number": f"eq.{data.account_number}",
+                "select": "id"
+            }
+        )
+        existing = res.json()
+
+        payload = {
+            "user_id": user_id,
+            "account_number": data.account_number,
+            "account_name": data.account_name,
+            "balance": data.balance,
+            "equity": data.equity,
+            "drawdown_pct": data.drawdown_pct,
+            "open_trades": data.open_trades,
+            "closed_trades": data.closed_trades,
+            "stats": data.stats,
+            "last_update": datetime.utcnow().isoformat()
+        }
+
+        if existing:
+            # 3a. Aggiorna record esistente
+            record_id = existing[0]["id"]
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/mt5_accounts",
+                headers=supabase_headers(),
+                params={"id": f"eq.{record_id}"},
+                json=payload
+            )
+        else:
+            # 3b. Crea nuovo record
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/mt5_accounts",
+                headers=supabase_headers(),
+                json=payload
+            )
+
+    return {"status": "ok"}
+
+
+@app.get("/mt5/accounts")
+async def mt5_get_accounts(api_key: str = Query(...)):
+    """Restituisce tutti i conti MT5 dell'utente"""
+
+    async with httpx.AsyncClient() as client:
+
+        # 1. Trova user_id tramite api_key
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "user_id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        user_id = profiles[0]["user_id"]
+
+        # 2. Recupera tutti i conti
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/mt5_accounts",
+            headers=supabase_headers(),
+            params={"user_id": f"eq.{user_id}"}
+        )
+        accounts = res.json()
+
+    return {"accounts": accounts}
