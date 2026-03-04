@@ -176,13 +176,13 @@ async def mt5_update(data: MT5Data):
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/profiles",
             headers=supabase_headers(),
-            params={"api_key": f"eq.{data.api_key}", "select": "user_id"}
+            params={"api_key": f"eq.{data.api_key}", "select": "id"}
         )
         profiles = res.json()
         if not profiles:
             raise HTTPException(status_code=401, detail="API key non valida")
 
-        user_id = profiles[0]["user_id"]
+        user_id = profiles[0]["id"]
 
         # 2. Cerca se esiste già un record per questo conto
         res = await client.get(
@@ -239,13 +239,13 @@ async def mt5_get_accounts(api_key: str = Query(...)):
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/profiles",
             headers=supabase_headers(),
-            params={"api_key": f"eq.{api_key}", "select": "user_id"}
+            params={"api_key": f"eq.{api_key}", "select": "id"}
         )
         profiles = res.json()
         if not profiles:
             raise HTTPException(status_code=401, detail="API key non valida")
 
-        user_id = profiles[0]["user_id"]
+        user_id = profiles[0]["id"]
 
         # 2. Recupera tutti i conti
         res = await client.get(
