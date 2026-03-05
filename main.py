@@ -166,6 +166,7 @@ class MT5Data(BaseModel):
     closed_trades: Optional[list] = []
     stats: Optional[dict] = {}
     currency: Optional[str] = "USD"
+    platform: Optional[str] = "MT5"
 
 @app.post("/mt5/update")
 async def mt5_update(data: MT5Data):
@@ -208,6 +209,7 @@ async def mt5_update(data: MT5Data):
             "closed_trades": data.closed_trades,
             "stats": data.stats,
             "currency": data.currency,
+            "platform": data.platform,
             "last_update": datetime.utcnow().isoformat()
         }
 
@@ -233,6 +235,7 @@ async def mt5_update(data: MT5Data):
         "user_id": user_id,
         "account_number": data.account_number,
         "currency": data.currency,
+        "platform": data.platform,
         "balance": data.balance,
         "equity": data.equity,
     }
