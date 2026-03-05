@@ -264,6 +264,7 @@ async def mt5_update(data: MT5Data):
                         "profit": trade.get("profit"),
                         "magic": trade.get("magic", 0),
                         "close_time": trade.get("time"),
+                        "open_time": trade.get("open_time"),
                     }
                     await client3.post(
                         f"{SUPABASE_URL}/rest/v1/mt5_trade_history",
