@@ -228,6 +228,21 @@ async def mt5_update(data: MT5Data):
                 json=payload
             )
 
+    # Salva snapshot storico
+    snapshot_payload = {
+        "user_id": user_id,
+        "account_number": data.account_number,
+        "currency": data.currency,
+        "balance": data.balance,
+        "equity": data.equity,
+    }
+    async with httpx.AsyncClient() as client2:
+        await client2.post(
+            f"{SUPABASE_URL}/rest/v1/mt5_snapshots",
+            headers=supabase_headers(),
+            json=snapshot_payload
+        )
+
     return {"status": "ok"}
 
 
@@ -258,3 +273,33 @@ async def mt5_get_accounts(api_key: str = Query(...)):
         accounts = res.json()
 
     return {"accounts": accounts}
+
+
+@app.get("/mt5/snapshots")
+async def mt5_get_snapshots(api_key: str = Query(...)):
+    """Restituisce gli snapshot storici di tutti i conti dell'utente"""
+
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        user_id = profiles[0]["id"]
+
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/mt5_snapshots",
+            headers=supabase_headers(),
+            params={
+                "user_id": f"eq.{user_id}",
+                "order": "recorded_at.asc",
+                "select": "account_number,currency,balance,equity,recorded_at"
+            }
+        )
+        snapshots = res.json()
+
+    return {"snapshots": snapshots}
