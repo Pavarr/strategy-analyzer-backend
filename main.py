@@ -294,16 +294,14 @@ async def mt5_get_snapshots(api_key: str = Query(...)):
 
         user_id = profiles[0]["id"]
 
-        headers_with_range = supabase_headers()
-        headers_with_range["Range-Unit"] = "items"
-        headers_with_range["Range"] = "0-9999"
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_snapshots",
-            headers=headers_with_range,
+            headers=supabase_headers(),
             params={
                 "user_id": f"eq.{user_id}",
                 "order": "recorded_at.asc",
-                "select": "account_number,currency,balance,equity,recorded_at"
+                "select": "account_number,currency,balance,equity,recorded_at",
+                "limit": "10000"
             }
         )
         snapshots = res.json()
