@@ -246,6 +246,33 @@ async def mt5_update(data: MT5Data):
             json=snapshot_payload
         )
 
+    # Salva trade chiusi (senza duplicati grazie a unique constraint)
+    if data.closed_trades:
+        async with httpx.AsyncClient() as client3:
+            for trade in data.closed_trades:
+                try:
+                    trade_payload = {
+                        "user_id": user_id,
+                        "account_number": data.account_number,
+                        "account_name": data.account_name,
+                        "currency": data.currency,
+                        "ticket": trade.get("ticket"),
+                        "symbol": trade.get("symbol"),
+                        "type": trade.get("type"),
+                        "lots": trade.get("lots"),
+                        "price": trade.get("price"),
+                        "profit": trade.get("profit"),
+                        "magic": trade.get("magic", 0),
+                        "close_time": trade.get("time"),
+                    }
+                    await client3.post(
+                        f"{SUPABASE_URL}/rest/v1/mt5_trade_history",
+                        headers={**supabase_headers(), "Prefer": "resolution=ignore-duplicates"},
+                        json=trade_payload
+                    )
+                except Exception:
+                    pass
+
     return {"status": "ok"}
 
 
@@ -307,3 +334,43 @@ async def mt5_get_snapshots(api_key: str = Query(...)):
         snapshots = res.json()
 
     return {"snapshots": snapshots}
+
+
+@app.get("/mt5/trade-history")
+async def mt5_trade_history(
+    api_key: str = Query(...),
+    date_from: str = Query(None),
+    date_to: str = Query(None)
+):
+    """Restituisce lo storico trade chiusi dell'utente con filtri opzionali"""
+
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        user_id = profiles[0]["id"]
+
+        params = {
+            "user_id": f"eq.{user_id}",
+            "order": "close_time.desc",
+            "limit": "10000"
+        }
+        if date_from:
+            params["close_time"] = f"gte.{date_from}"
+        if date_to:
+            params["close_time"] = f"lte.{date_to}"
+
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/mt5_trade_history",
+            headers=supabase_headers(),
+            params=params
+        )
+        trades = res.json()
+
+    return {"trades": trades}
