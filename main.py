@@ -294,9 +294,12 @@ async def mt5_get_snapshots(api_key: str = Query(...)):
 
         user_id = profiles[0]["id"]
 
+        headers_with_range = supabase_headers()
+        headers_with_range["Range-Unit"] = "items"
+        headers_with_range["Range"] = "0-9999"
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_snapshots",
-            headers=supabase_headers(),
+            headers=headers_with_range,
             params={
                 "user_id": f"eq.{user_id}",
                 "order": "recorded_at.asc",
