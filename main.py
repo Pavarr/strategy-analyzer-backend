@@ -231,6 +231,10 @@ async def mt5_update(data: MT5Data):
             )
 
     # Salva snapshot storico
+    # Arrotonda al minuto per allineare snapshot di conti diversi
+    from datetime import timezone
+    now_rounded = datetime.utcnow().replace(second=0, microsecond=0)
+
     snapshot_payload = {
         "user_id": user_id,
         "account_number": data.account_number,
@@ -238,6 +242,7 @@ async def mt5_update(data: MT5Data):
         "platform": data.platform,
         "balance": data.balance,
         "equity": data.equity,
+        "recorded_at": now_rounded.isoformat(),
     }
     async with httpx.AsyncClient() as client2:
         await client2.post(
