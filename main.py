@@ -380,3 +380,82 @@ async def mt5_trade_history(
         trades = res.json()
 
     return {"trades": trades}
+
+
+@app.get("/capital-events")
+async def get_capital_events(api_key: str = Query(...)):
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+        user_id = profiles[0]["id"]
+
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/capital_events",
+            headers=supabase_headers(),
+            params={"user_id": f"eq.{user_id}", "order": "event_date.asc", "limit": "1000"}
+        )
+    return {"events": res.json()}
+
+
+class CapitalEventData(BaseModel):
+    account_number: str
+    currency: str
+    amount: float
+    event_date: Optional[str] = None
+    description: Optional[str] = ""
+
+@app.post("/capital-events")
+async def add_capital_event(data: CapitalEventData, api_key: str = Query(...)):
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+        user_id = profiles[0]["id"]
+
+        payload = {
+            "user_id": user_id,
+            "account_number": data.account_number,
+            "currency": data.currency,
+            "amount": data.amount,
+            "description": data.description,
+        }
+        if data.event_date:
+            payload["event_date"] = data.event_date
+
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/capital_events",
+            headers=supabase_headers(),
+            json=payload
+        )
+    return {"status": "ok"}
+
+
+@app.delete("/capital-events/{event_id}")
+async def delete_capital_event(event_id: str, api_key: str = Query(...)):
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        await client.delete(
+            f"{SUPABASE_URL}/rest/v1/capital_events",
+            headers=supabase_headers(),
+            params={"id": f"eq.{event_id}"}
+        )
+    return {"status": "ok"}
