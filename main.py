@@ -340,15 +340,16 @@ async def mt5_trade_history(
 
         user_id = profiles[0]["id"]
 
-        params = {
-            "user_id": f"eq.{user_id}",
-            "order": "close_time.desc",
-            "limit": "10000"
-        }
+        # httpx accetta lista di tuple per parametri duplicati (necessario per filtri multipli sulla stessa colonna)
+        params = [
+            ("user_id", f"eq.{user_id}"),
+            ("order", "close_time.desc"),
+            ("limit", "10000"),
+        ]
         if date_from:
-            params["close_time"] = f"gte.{date_from}"
+            params.append(("close_time", f"gte.{date_from}"))
         if date_to:
-            params["close_time"] = f"lte.{date_to}"
+            params.append(("close_time", f"lte.{date_to}"))
 
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_trade_history",
