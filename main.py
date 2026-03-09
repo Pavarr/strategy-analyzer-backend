@@ -40,23 +40,18 @@ async def upload_strategy(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File must be .html")
     
     try:
-        # Save to temp file
         with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.html') as temp_file:
             content = await file.read()
             temp_file.write(content)
             temp_path = temp_file.name
         
-        # Parse with original filename
         parser = StrategyParser(temp_path, original_filename=file.filename)
         result = parser.generate_output(risk_free_rate=0, trade_type='all')
         
         strategy_name = result['strategy_name']
-        
-        # Store parser and result
         parsers_storage[strategy_name] = parser
         strategies_storage[strategy_name] = result
         
-        # Cleanup
         os.unlink(temp_path)
         
         return result
@@ -69,16 +64,13 @@ async def get_strategy(
     name: str,
     trade_type: str = Query('all', regex='^(all|long|short)$')
 ):
-    """Get strategy data with optional trade type filter"""
     if name not in parsers_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
     
     try:
         parser = parsers_storage[name]
         result = parser.generate_output(risk_free_rate=0, trade_type=trade_type)
-        
         return result
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -90,50 +82,37 @@ async def recalculate_metrics(
     lot_multiplier: float = Query(None),
     trade_type: str = Query('all', regex='^(all|long|short)$')
 ):
-    """Recalculate metrics with new parameters"""
     if name not in parsers_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
     
     try:
         parser = parsers_storage[name]
-        
-        # Reset to original
         parser.reset_trades()
         
-        # Apply lot multiplier if provided (lot_multiplier è il NUOVO lottaggio assoluto)
         if lot_multiplier is not None and parser.original_lot_size:
-            # Calcola ratio
             ratio = lot_multiplier / parser.original_lot_size
             parser.apply_lot_multiplier(ratio)
         
         result = parser.generate_output(
-            risk_free_rate=rf_rate, 
+            risk_free_rate=rf_rate,
             custom_balance=balance,
             trade_type=trade_type
         )
-        
-        # Update storage
         strategies_storage[name] = result
-        
         return result
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/strategies/{name}")
 async def delete_strategy(name: str):
-    """Delete strategy from memory"""
     if name not in strategies_storage:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    
     del strategies_storage[name]
     del parsers_storage[name]
-    
     return {"message": f"Strategy '{name}' deleted"}
 
 @app.get("/strategies")
 async def list_strategies():
-    """List all uploaded strategies"""
     return {"strategies": list(strategies_storage.keys())}
 
 
@@ -143,7 +122,7 @@ async def list_strategies():
 from pydantic import BaseModel
 from typing import Optional, List
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -173,8 +152,6 @@ async def mt5_update(data: MT5Data):
     """Riceve i dati dall'EA MT5 e li salva su Supabase"""
 
     async with httpx.AsyncClient() as client:
-
-        # 1. Trova l'utente tramite api_key
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/profiles",
             headers=supabase_headers(),
@@ -186,7 +163,6 @@ async def mt5_update(data: MT5Data):
 
         user_id = profiles[0]["id"]
 
-        # 2. Cerca se esiste già un record per questo conto
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_accounts",
             headers=supabase_headers(),
@@ -214,7 +190,6 @@ async def mt5_update(data: MT5Data):
         }
 
         if existing:
-            # 3a. Aggiorna record esistente
             record_id = existing[0]["id"]
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/mt5_accounts",
@@ -223,18 +198,14 @@ async def mt5_update(data: MT5Data):
                 json=payload
             )
         else:
-            # 3b. Crea nuovo record
             await client.post(
                 f"{SUPABASE_URL}/rest/v1/mt5_accounts",
                 headers=supabase_headers(),
                 json=payload
             )
 
-    # Salva snapshot storico
-    # Arrotonda al minuto per allineare snapshot di conti diversi
-    from datetime import timezone
+    # Snapshot storico — arrotonda al minuto
     now_rounded = datetime.utcnow().replace(second=0, microsecond=0)
-
     snapshot_payload = {
         "user_id": user_id,
         "account_number": data.account_number,
@@ -251,7 +222,7 @@ async def mt5_update(data: MT5Data):
             json=snapshot_payload
         )
 
-    # Salva trade chiusi (senza duplicati grazie a unique constraint)
+    # Trade chiusi (no duplicati grazie a unique constraint)
     if data.closed_trades:
         async with httpx.AsyncClient() as client3:
             for trade in data.closed_trades:
@@ -287,8 +258,6 @@ async def mt5_get_accounts(api_key: str = Query(...)):
     """Restituisce tutti i conti MT5 dell'utente"""
 
     async with httpx.AsyncClient() as client:
-
-        # 1. Trova user_id tramite api_key
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/profiles",
             headers=supabase_headers(),
@@ -300,7 +269,6 @@ async def mt5_get_accounts(api_key: str = Query(...)):
 
         user_id = profiles[0]["id"]
 
-        # 2. Recupera tutti i conti
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_accounts",
             headers=supabase_headers(),
@@ -312,8 +280,13 @@ async def mt5_get_accounts(api_key: str = Query(...)):
 
 
 @app.get("/mt5/snapshots")
-async def mt5_get_snapshots(api_key: str = Query(...)):
-    """Restituisce gli snapshot storici di tutti i conti dell'utente"""
+async def mt5_get_snapshots(
+    api_key: str = Query(...),
+    date_from: str = Query(None)
+):
+    """Restituisce gli snapshot storici dell'utente.
+    date_from: ISO datetime opzionale (es. 2026-03-01T00:00:00).
+    Se non passato, default ultimi 30 giorni."""
 
     async with httpx.AsyncClient() as client:
         res = await client.get(
@@ -327,6 +300,10 @@ async def mt5_get_snapshots(api_key: str = Query(...)):
 
         user_id = profiles[0]["id"]
 
+        # Default: ultimi 30 giorni
+        if not date_from:
+            date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/mt5_snapshots",
             headers=supabase_headers(),
@@ -334,7 +311,8 @@ async def mt5_get_snapshots(api_key: str = Query(...)):
                 "user_id": f"eq.{user_id}",
                 "order": "recorded_at.asc",
                 "select": "account_number,currency,balance,equity,recorded_at",
-                "limit": "10000"
+                "limit": "50000",
+                "recorded_at": f"gte.{date_from}"
             }
         )
         snapshots = res.json()
