@@ -25,7 +25,7 @@ FRED_SERIES = {
     "sp500":  "SP500",
     "vix":    "VIXCLS",
     "dxy":    "DTWEXBGS",
-    "gold":   "GOLDAMGBD228NLBM",
+    "gold":   "GOLDPMGBD228NLBM",   # Gold London PM fix (più aggiornata)
     "y10":    "DGS10",
     "y2":     "DGS2",
     "hy_oas": "BAMLH0A0HYM2",
@@ -127,7 +127,8 @@ async def get_market_data():
                 for k, (sid, lim) in FRED_HISTORY.items()
             },
             # SPY storico da Yahoo come fallback/integrazione
-            "yf_spy": fetch_yf_chart(client, "SPY", "1y"),
+            "yf_spy":  fetch_yf_chart(client, "SPY", "1y"),
+            "yf_gold": fetch_yf_chart(client, "GC%3DF", "5d"),   # Gold futures fallback
         }
 
         results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
@@ -169,7 +170,7 @@ async def get_market_data():
         "vix_change":    change_from_hist(vix_hist),
         "dxy":           val("dxy"),
         "dxy_ma20":      dxy_ma20,
-        "gold":          val("gold"),
+        "gold":          val("gold") or (results.get("yf_gold") or {}).get("price"),
         "y10":           val("y10"),
         "y2":            val("y2"),
         "credit_spread": val("hy_oas"),
