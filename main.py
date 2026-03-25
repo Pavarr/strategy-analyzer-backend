@@ -438,3 +438,5 @@ async def delete_capital_event(event_id: str, api_key: str = Query(...)):
             params={"id": f"eq.{event_id}"}
         )
     return {"status": "ok"}
+from market_routes import router as market_router
+app.include_router(market_router)
