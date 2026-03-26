@@ -84,7 +84,7 @@ def period_changes(hist: list) -> dict:
             return None
         cur, prev = values[-1], values[-(offset + 1)]
         return round((cur - prev) / prev * 100, 2) if prev else None
-    return {"1d": pct(1), "7d": pct(7), "15d": pct(15), "30d": pct(30)}
+    return {"1d": pct(1), "3d": pct(3), "7d": pct(7), "15d": pct(15), "30d": pct(30)}
 
 
 def moving_average(values: list, window: int):
