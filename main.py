@@ -284,9 +284,7 @@ async def mt5_get_snapshots(
     api_key: str = Query(...),
     date_from: str = Query(None)
 ):
-    """Restituisce gli snapshot storici dell'utente.
-    date_from: ISO datetime opzionale (es. 2026-03-01T00:00:00).
-    Se non passato, default ultimi 30 giorni."""
+    """Restituisce gli snapshot storici dell'utente."""
 
     async with httpx.AsyncClient() as client:
         res = await client.get(
@@ -300,7 +298,6 @@ async def mt5_get_snapshots(
 
         user_id = profiles[0]["id"]
 
-        # Default: ultimi 30 giorni
         if not date_from:
             date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -340,7 +337,6 @@ async def mt5_trade_history(
 
         user_id = profiles[0]["id"]
 
-        # httpx accetta lista di tuple per parametri duplicati (necessario per filtri multipli sulla stessa colonna)
         params = [
             ("user_id", f"eq.{user_id}"),
             ("order", "close_time.desc"),
@@ -438,5 +434,68 @@ async def delete_capital_event(event_id: str, api_key: str = Query(...)):
             params={"id": f"eq.{event_id}"}
         )
     return {"status": "ok"}
+
+
+# =============================================
+# PROP FIRM MATEMATICA ENDPOINT
+# =============================================
+
+class PropFirmData(BaseModel):
+    api_key: str
+    account_number: str
+    account_name: Optional[str] = ""
+    currency: Optional[str] = "USD"
+    balance: float
+    equity: float
+    drawdown_pct: Optional[float] = 0
+    open_trades: Optional[list] = []
+
+@app.post("/mt5/propfirm/update")
+async def propfirm_update(data: PropFirmData):
+    """
+    Riceve i dati dall'EA PropFirmSender e li salva in propfirm_snapshots.
+    Separato da mt5_snapshots — questi conti non appaiono in LivePortafogli.
+    """
+    async with httpx.AsyncClient() as client:
+        # Valida API key e recupera user_id
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers=supabase_headers(),
+            params={"api_key": f"eq.{data.api_key}", "select": "id"}
+        )
+        profiles = res.json()
+        if not profiles:
+            raise HTTPException(status_code=401, detail="API key non valida")
+
+        user_id = profiles[0]["id"]
+
+        # Inserisci snapshot in propfirm_snapshots
+        now_rounded = datetime.utcnow().replace(second=0, microsecond=0)
+        snapshot_payload = {
+            "user_id":        user_id,
+            "account_number": data.account_number,
+            "account_name":   data.account_name,
+            "currency":       data.currency,
+            "balance":        data.balance,
+            "equity":         data.equity,
+            "drawdown_pct":   data.drawdown_pct,
+            "open_trades":    data.open_trades,
+            "recorded_at":    now_rounded.isoformat(),
+        }
+
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/propfirm_snapshots",
+            headers=supabase_headers(),
+            json=snapshot_payload
+        )
+
+    return {
+        "status": "ok",
+        "account": data.account_number,
+        "balance": data.balance,
+        "equity":  data.equity
+    }
+
+
 from market_routes import router as market_router
 app.include_router(market_router)
